@@ -9,6 +9,162 @@ export interface TranscribeRequest {
   apiKeyOverride?: string;
   isKneePainBenchmark?: boolean;
   defaultSpeaker?: 'Doctor' | 'Patient';
+  diarizationMode?: 'ambient_ai' | 'doctor_dictation';
+  rawSegmentsToDiarize?: TranscriptSegment[];
+}
+
+const DEFAULT_DIARIZATION_PROMPT = `You are an expert medical conversation diarizer. Given raw timestamped speech text or segments from an Indian outpatient clinic consultation (Hindi, Marathi, English, or Hinglish), separate conversational turns cleanly and identify whether each utterance was spoken by the 'Doctor' (asks clinical questions, examines patient, explains assessment, prescribes medicines/tests) or the 'Patient' (reports symptoms, duration, past history, asks questions). Preserve the original meaning and clinical terms. Return strictly valid JSON: { "segments": [{ "id": "seg-1", "speaker": "Doctor" | "Patient", "timestamp": "00:00", "text": "...", "language": "Mixed" }] }`;
+
+/**
+ * Uses Groq / Gemini LLM to intelligently separate ambient consultation turns into Doctor vs Patient.
+ */
+async function diarizeSegmentsWithAI(segments: TranscriptSegment[]): Promise<TranscriptSegment[]> {
+  if (!segments || segments.length === 0) return segments;
+
+  const systemPrompt = (process.env.AMBIENT_DIARIZATION_PROMPT && process.env.AMBIENT_DIARIZATION_PROMPT.trim().length > 20)
+    ? process.env.AMBIENT_DIARIZATION_PROMPT.trim()
+    : DEFAULT_DIARIZATION_PROMPT;
+
+  const userPayload = `Diarize these consultation speech segments into Doctor and Patient turns:\n${JSON.stringify(segments)}`;
+
+  // 1. Try Groq first (ultra-fast)
+  const groqKey = process.env.GROQ_API_KEY?.trim();
+  if (groqKey && groqKey.length > 5) {
+    for (const model of ['openai/gpt-oss-120b', 'openai/gpt-oss-20b']) {
+      try {
+        const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${groqKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            response_format: { type: 'json_object' },
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPayload },
+            ],
+            temperature: 0.1,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const raw = data.choices?.[0]?.message?.content || '';
+          const parsed = JSON.parse(raw.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim());
+          if (Array.isArray(parsed.segments) && parsed.segments.length > 0) {
+            return parsed.segments.map((s: any, i: number) => ({
+              id: s.id || `diar-${i + 1}`,
+              speaker: s.speaker === 'Patient' ? 'Patient' : 'Doctor',
+              timestamp: s.timestamp || segments[0]?.timestamp || '00:00',
+              text: String(s.text || '').trim(),
+              language: s.language || 'Mixed',
+            })).filter((s: TranscriptSegment) => s.text.length > 0);
+          }
+        }
+      } catch (err) {
+        console.warn(`Groq diarization failed on ${model}:`, err);
+      }
+    }
+  }
+
+  // 2. Try Gemini fallback
+  const geminiKey = process.env.GEMINI_API_KEY?.trim();
+  if (geminiKey && geminiKey.length > 5) {
+    for (const model of ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-flash-latest']) {
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: [{ parts: [{ text: userPayload }] }],
+            generationConfig: { responseMimeType: 'application/json', temperature: 0.1 },
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) {
+            const parsed = JSON.parse(text.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim());
+            if (Array.isArray(parsed.segments) && parsed.segments.length > 0) {
+              return parsed.segments.map((s: any, i: number) => ({
+                id: s.id || `diar-${i + 1}`,
+                speaker: s.speaker === 'Patient' ? 'Patient' : 'Doctor',
+                timestamp: s.timestamp || segments[0]?.timestamp || '00:00',
+                text: String(s.text || '').trim(),
+                language: s.language || 'Mixed',
+              })).filter((s: TranscriptSegment) => s.text.length > 0);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`Gemini diarization failed on ${model}:`, err);
+      }
+    }
+  }
+
+  // Deterministic clinical heuristic diarization fallback (works offline/without LLM keys)
+  return heuristicDiarizeSegments(segments);
+}
+
+function heuristicDiarizeSegments(segments: TranscriptSegment[]): TranscriptSegment[] {
+  const out: TranscriptSegment[] = [];
+  let idx = 1;
+
+  for (const seg of segments) {
+    // Split on explicit markers or sentence boundaries if a single large chunk was captured
+    const rawParts = seg.text
+      .split(/(?=\b(?:Doctor|Patient)\s*:)|(?<=[.?!।])\s+/i)
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    if (rawParts.length <= 1) {
+      out.push(seg);
+      continue;
+    }
+
+    // Group contiguous sentences with same predicted speaker
+    for (const part of rawParts) {
+      let speaker: 'Doctor' | 'Patient' = seg.speaker;
+      let cleanText = part;
+
+      if (/^Patient\s*:/i.test(part)) {
+        speaker = 'Patient';
+        cleanText = part.replace(/^Patient\s*:/i, '').trim();
+      } else if (/^Doctor\s*:/i.test(part)) {
+        speaker = 'Doctor';
+        cleanText = part.replace(/^Doctor\s*:/i, '').trim();
+      } else {
+        const lower = part.toLowerCase();
+        const doctorCues = /\b(tell me|what problem|let me examine|examine|i see|prescrib|take tab|tablet|capsule|syrup|mg|twice daily|once daily|after food|before food|advised|x-ray|blood test|follow[- ]?up|diagnosis|check your)\b|\?$/i;
+        const patientCues = /\b(i have|i am having|since \d|for \d+ (day|week|month)|pain in|severe|hurts|doctor|mujhe|dard|takleef|bukhar|malaria|stomach|headache|fever)\b/i;
+
+        if (doctorCues.test(lower) && !patientCues.test(lower)) {
+          speaker = 'Doctor';
+        } else if (patientCues.test(lower)) {
+          speaker = 'Patient';
+        }
+      }
+
+      if (!cleanText) continue;
+
+      const prev = out[out.length - 1];
+      if (prev && prev.speaker === speaker && !/^Doctor:|^Patient:/i.test(part)) {
+        prev.text = `${prev.text} ${cleanText}`;
+      } else {
+        out.push({
+          id: `diar-h-${idx++}`,
+          speaker,
+          timestamp: seg.timestamp || formatSeconds((idx - 1) * 8),
+          text: cleanText,
+          language: seg.language || 'Mixed',
+        });
+      }
+    }
+  }
+
+  return out.length > 0 ? out : segments;
 }
 
 export async function transcribeAudio(req: TranscribeRequest): Promise<{
@@ -19,73 +175,94 @@ export async function transcribeAudio(req: TranscribeRequest): Promise<{
   const provider = req.providerOverride || process.env.TRANSCRIPTION_PROVIDER || 'mock';
   const speakerLabel = req.defaultSpeaker || 'Doctor';
 
-  // 1. GROQ WHISPER LIVE ADAPTER (100% Free ultra-fast Whisper Large v3)
+  // Diarize live-captured browser speech segments directly when requested
+  if (req.rawSegmentsToDiarize && req.rawSegmentsToDiarize.length > 0) {
+    const diarized = req.diarizationMode === 'ambient_ai'
+      ? await diarizeSegmentsWithAI(req.rawSegmentsToDiarize)
+      : req.rawSegmentsToDiarize;
+    return {
+      transcript: diarized,
+      providerUsed: req.diarizationMode === 'ambient_ai'
+        ? 'AI Ambient Speaker Diarization [LIVE]'
+        : 'Doctor Clinical Dictation [LIVE]',
+      detectedLanguage: 'Mixed (HI / MR / EN)'
+    };
+  }
+
+  // 1. GROQ WHISPER LIVE ADAPTER (100% Free ultra-fast Whisper Large v3 + AI Diarization)
   if (provider === 'groq') {
     const apiKey = req.apiKeyOverride || process.env.GROQ_API_KEY;
     if (apiKey && req.audioBase64) {
-      try {
-        const cleanBase64 = req.audioBase64.replace(/^data:.*?;base64,/, '').trim();
-        const audioBuffer = Buffer.from(cleanBase64, 'base64');
+      const cleanBase64 = req.audioBase64.replace(/^data:.*?;base64,/, '').trim();
+      const audioBuffer = Buffer.from(cleanBase64, 'base64');
 
-        let ext = 'webm';
-        if (req.mimeType?.includes('wav')) ext = 'wav';
-        else if (req.mimeType?.includes('ogg')) ext = 'ogg';
-        else if (req.mimeType?.includes('mp4') || req.mimeType?.includes('m4a')) ext = 'm4a';
-        else if (req.mimeType?.includes('mp3') || req.mimeType?.includes('mpeg')) ext = 'mp3';
+      let ext = 'webm';
+      if (req.mimeType?.includes('wav')) ext = 'wav';
+      else if (req.mimeType?.includes('ogg')) ext = 'ogg';
+      else if (req.mimeType?.includes('mp4') || req.mimeType?.includes('m4a')) ext = 'm4a';
+      else if (req.mimeType?.includes('mp3') || req.mimeType?.includes('mpeg')) ext = 'mp3';
 
-        const formData = new FormData();
-        const blob = new Blob([audioBuffer], { type: req.mimeType || 'audio/webm' });
-        formData.append('file', blob, `recording.${ext}`);
-        formData.append('model', 'whisper-large-v3');
-        formData.append('prompt', 'Doctor patient medical consultation in Hindi, Marathi, and English.');
-        if (req.language) {
-          formData.append('language', req.language);
-        }
-        formData.append('response_format', 'verbose_json');
-
-        const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${apiKey.trim()}`,
-          },
-          body: formData,
-        });
-
-        if (response.ok) {
-          const result = await response.json();
-          const segments: TranscriptSegment[] = (result.segments || [])
-            .filter((seg: any) => seg.text && seg.text.trim().length > 0)
-            .map((seg: any, idx: number) => ({
-              id: `groq-stt-${idx}`,
-              speaker: speakerLabel,
-              timestamp: formatSeconds(seg.start || 0),
-              text: seg.text.trim(),
-              language: result.language || 'hi'
-            }));
-
-          if (segments.length === 0 && result.text && result.text.trim().length > 0) {
-            segments.push({
-              id: 'groq-stt-1',
-              speaker: speakerLabel,
-              timestamp: '00:00',
-              text: result.text.trim(),
-              language: result.language || 'hi'
-            });
+      for (const whisperModel of ['whisper-large-v3', 'whisper-large-v3-turbo']) {
+        try {
+          const formData = new FormData();
+          const blob = new Blob([audioBuffer], { type: req.mimeType || 'audio/webm' });
+          formData.append('file', blob, `recording.${ext}`);
+          formData.append('model', whisperModel);
+          formData.append('prompt', 'Parasnath Clinic OPD consultation in Hindi, Marathi, and English.');
+          if (req.language && req.language !== 'auto') {
+            formData.append('language', req.language);
           }
+          formData.append('response_format', 'verbose_json');
 
-          if (segments.length > 0) {
-            return {
-              transcript: segments,
-              providerUsed: 'Groq Whisper-Large-V3 [LIVE Free Engine]',
-              detectedLanguage: result.language || 'Mixed'
-            };
+          const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${apiKey.trim()}`,
+            },
+            body: formData,
+          });
+
+          if (response.ok) {
+            const result = await response.json();
+            let segments: TranscriptSegment[] = (result.segments || [])
+              .filter((seg: any) => seg.text && seg.text.trim().length > 0)
+              .map((seg: any, idx: number) => ({
+                id: `groq-stt-${idx}`,
+                speaker: speakerLabel,
+                timestamp: formatSeconds(seg.start || 0),
+                text: seg.text.trim(),
+                language: result.language || 'Mixed'
+              }));
+
+            if (segments.length === 0 && result.text && result.text.trim().length > 0) {
+              segments.push({
+                id: 'groq-stt-1',
+                speaker: speakerLabel,
+                timestamp: '00:00',
+                text: result.text.trim(),
+                language: result.language || 'Mixed'
+              });
+            }
+
+            if (segments.length > 0) {
+              if (req.diarizationMode === 'ambient_ai') {
+                segments = await diarizeSegmentsWithAI(segments);
+              }
+              return {
+                transcript: segments,
+                providerUsed: req.diarizationMode === 'ambient_ai'
+                  ? `Groq ${whisperModel} + AI Speaker Diarization [LIVE]`
+                  : `Groq ${whisperModel} [LIVE Free Engine]`,
+                detectedLanguage: result.language || 'Mixed'
+              };
+            }
+          } else {
+            const errText = await response.text();
+            console.warn(`Groq Whisper (${whisperModel}) returned error:`, response.status, errText);
           }
-        } else {
-          const errText = await response.text();
-          console.warn('Groq Whisper API returned error:', response.status, errText);
+        } catch (err) {
+          console.warn(`Groq Whisper (${whisperModel}) connection error:`, err);
         }
-      } catch (err) {
-        console.warn('Groq Whisper connection error:', err);
       }
     }
   }

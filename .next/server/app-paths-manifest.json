@@ -1,5 +1,7 @@
 {
-  "/api/consultations/[id]/extract/route": "app/api/consultations/[id]/extract/route.js",
+  "/api/audio/route": "app/api/audio/route.js",
   "/doctor/page": "app/doctor/page.js",
-  "/api/consultations/[id]/transcribe/route": "app/api/consultations/[id]/transcribe/route.js"
+  "/api/audio/[filename]/route": "app/api/audio/[filename]/route.js",
+  "/admin/page": "app/admin/page.js",
+  "/patient/page": "app/patient/page.js"
 }

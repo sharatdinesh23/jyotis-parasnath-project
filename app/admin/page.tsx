@@ -12,6 +12,7 @@ import {
 import { DashboardView } from '@/components/DashboardView';
 import { PatientCRMView } from '@/components/PatientCRMView';
 import { SettingsView } from '@/components/SettingsView';
+import { AudioArchiveView } from '@/components/AudioArchiveView';
 import {
   LayoutDashboard,
   Users2,
@@ -21,7 +22,8 @@ import {
   Building,
   FileSpreadsheet,
   FileText,
-  Lock
+  Lock,
+  Volume2
 } from 'lucide-react';
 import { exportCRMToExcel } from '@/lib/excelExport';
 
@@ -29,9 +31,10 @@ export default function AdminWorkspacePage() {
   const router = useRouter();
   const [sessionUser, setSessionUser] = useState<any>(null);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'crm' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'crm' | 'audio' | 'settings'>('dashboard');
   const [patients, setPatients] = useState<Patient[]>([]);
   const [consultations, setConsultations] = useState<Consultation[]>([]);
+  const [patientVoiceNotes, setPatientVoiceNotes] = useState<any[]>([]);
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
   const [kpis, setKpis] = useState({
     totalPatients: 3,
@@ -90,6 +93,10 @@ export default function AdminWorkspacePage() {
     fetch('/api/consultations')
       .then(res => res.json())
       .then(data => { if (data.consultations) setConsultations(data.consultations); });
+
+    fetch('/api/patient-voice-notes')
+      .then(res => res.json())
+      .then(data => { if (data.voiceNotes) setPatientVoiceNotes(data.voiceNotes); });
   }, [router]);
 
   const handleLogout = () => {
@@ -163,6 +170,18 @@ export default function AdminWorkspacePage() {
             </button>
 
             <button
+              onClick={() => setActiveTab('audio')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition-all ${
+                activeTab === 'audio'
+                  ? 'bg-purple-600 text-white shadow'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Volume2 className="w-3.5 h-3.5" />
+              <span>Audio Archive</span>
+            </button>
+
+            <button
               onClick={() => setActiveTab('settings')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition-all ${
                 activeTab === 'settings'
@@ -229,6 +248,14 @@ export default function AdminWorkspacePage() {
               currentLanguage="en"
               onSelectConsultation={() => router.push('/doctor')}
               onNavigateToView={(tab) => setActiveTab(tab === 'dashboard' ? 'dashboard' : 'crm')}
+            />
+          )}
+
+          {activeTab === 'audio' && (
+            <AudioArchiveView
+              consultations={consultations}
+              patientVoiceNotes={patientVoiceNotes}
+              onOpenConsultation={() => router.push('/doctor')}
             />
           )}
 

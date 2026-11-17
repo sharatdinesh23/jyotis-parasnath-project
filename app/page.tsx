@@ -200,9 +200,16 @@ export default function Home() {
     setActiveTab('crm');
   };
 
-  const handleSaveConsultationDraft = (consultation: Consultation) => {
+  const handleSaveConsultationDraft = async (consultation: Consultation) => {
     clinicStore.saveConsultation(consultation);
     setActiveConsultationId(consultation.id);
+    try {
+      await fetch('/api/consultations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(consultation),
+      });
+    } catch {}
   };
 
   const handleApproveConsultation = (id: string, docName: string) => {

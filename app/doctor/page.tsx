@@ -284,10 +284,19 @@ export default function DoctorWorkspacePage() {
               allPatients={patients}
               onSelectPatient={setSelectedPatient}
               currentDoctor={currentDoctor}
-              onSaveConsultationDraft={(c) => {
+              onSaveConsultationDraft={async (c) => {
                 setConsultations([c, ...consultations]);
                 setActiveConsultationId(c.id);
                 setActiveTab('approvals');
+                try {
+                  await fetch('/api/consultations', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(c),
+                  });
+                } catch (err) {
+                  console.warn('Could not persist consultation draft to SQLite:', err);
+                }
               }}
               onProceedToApproval={(id) => {
                 setActiveConsultationId(id);

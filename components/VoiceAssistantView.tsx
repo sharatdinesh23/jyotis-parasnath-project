@@ -78,9 +78,13 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   // STT & Audio Capture State
+  const [recordingMode, setRecordingMode] = useState<'ambient_ai' | 'doctor_dictation'>('ambient_ai');
+  const [activeLiveSpeaker, setActiveLiveSpeaker] = useState<'Doctor' | 'Patient'>('Doctor');
+  const [sttLanguage, setSttLanguage] = useState<'auto' | 'en' | 'hi' | 'mr'>('auto');
   const [isTranscribing, setIsTranscribing] = useState(false);
-  const [transcriptionEngineUsed, setTranscriptionEngineUsed] = useState<string>('Groq Whisper-Large-V3 [Ready]');
+  const [transcriptionEngineUsed, setTranscriptionEngineUsed] = useState<string>('Groq Whisper-Large-V3 + AI Diarization [Ready]');
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [persistedAudioUrl, setPersistedAudioUrl] = useState<string | null>(null);
   const [detectedLang, setDetectedLang] = useState<string>('Mixed Hindi / Marathi / English');
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -88,6 +92,10 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
   const streamRef = useRef<MediaStream | null>(null);
   const speechRecognitionRef = useRef<any>(null);
   const liveCapturedTextRef = useRef<string>('');
+  const liveTurnsRef = useRef<TranscriptSegment[]>([]);
+  const currentTurnTextRef = useRef<string>('');
+  const activeSpeakerRef = useRef<'Doctor' | 'Patient'>('Doctor');
+  const recordingSecondsRef = useRef<number>(0);
 
   // Transcript state (Diarised doctor & patient segments)
   const [transcript, setTranscript] = useState<TranscriptSegment[]>([]);
@@ -131,7 +139,11 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
   useEffect(() => {
     if (isRecording && !isPaused) {
       timerRef.current = setInterval(() => {
-        setRecordingSeconds((prev) => prev + 1);
+        setRecordingSeconds((prev) => {
+          const next = prev + 1;
+          recordingSecondsRef.current = next;
+          return next;
+        });
       }, 1000);
     } else {
       if (timerRef.current) clearInterval(timerRef.current);
@@ -144,6 +156,33 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Switch active speaker during live consultation recording to create clean turns
+  const handleSwitchLiveSpeaker = (nextSpeaker: 'Doctor' | 'Patient') => {
+    if (currentTurnTextRef.current.trim().length > 0) {
+      liveTurnsRef.current = [
+        ...liveTurnsRef.current,
+        {
+          id: `live-turn-${Date.now()}`,
+          speaker: activeSpeakerRef.current,
+          timestamp: formatTimer(recordingSecondsRef.current),
+          text: currentTurnTextRef.current.trim(),
+          language: sttLanguage === 'auto' ? 'Mixed' : sttLanguage,
+        },
+      ];
+      currentTurnTextRef.current = '';
+      setTranscript([...liveTurnsRef.current]);
+    }
+    activeSpeakerRef.current = nextSpeaker;
+    setActiveLiveSpeaker(nextSpeaker);
+
+    // Restart browser speech rec session cleanly so next speaker gets fresh turn buffer
+    if (speechRecognitionRef.current && isRecording) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch {}
+    }
+  };
+
   // Start Mic Recording with real MediaRecorder & Browser SpeechRecognition
   const handleStartRecording = async () => {
     if (!consentChecked) {
@@ -154,8 +193,14 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
     setTranscript([]);
     setExtractionResult(null);
     setAudioUrl(null);
+    setPersistedAudioUrl(null);
     audioChunksRef.current = [];
     liveCapturedTextRef.current = '';
+    liveTurnsRef.current = [];
+    currentTurnTextRef.current = '';
+    recordingSecondsRef.current = 0;
+    activeSpeakerRef.current = 'Doctor';
+    setActiveLiveSpeaker('Doctor');
     setRecordingSeconds(0);
 
     try {
@@ -173,47 +218,59 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
       mediaRecorder.start(250);
       setIsRecording(true);
       setIsPaused(false);
-      setStatusMessage('Microphone active. Capturing live in-room audio...');
+      setStatusMessage(
+        recordingMode === 'ambient_ai'
+          ? 'Microphone active: Recording Doctor–Patient conversation (AI will auto-diarize speakers, or tap speaker toggle anytime).'
+          : 'Microphone active: Recording Doctor Clinical Dictation.'
+      );
 
       // Real-time speech recognition for live instant words
       const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
       if (SpeechRec) {
-        try {
-          const rec = new SpeechRec();
-          rec.continuous = true;
-          rec.interimResults = true;
-          rec.lang = 'hi-IN';
+        const startRecognizer = () => {
+          try {
+            const rec = new SpeechRec();
+            rec.continuous = true;
+            rec.interimResults = true;
+            rec.lang = sttLanguage === 'en' ? 'en-IN' : sttLanguage === 'mr' ? 'mr-IN' : 'hi-IN';
 
-          rec.onresult = (evt: any) => {
-            const spoken = Array.from(evt.results)
-              .map((r: any) => r[0].transcript)
-              .join(' ');
-            if (spoken.trim().length > 0) {
-              liveCapturedTextRef.current = spoken.trim();
-              setTranscript([
-                {
-                  id: 'live-rec-1',
-                  speaker: 'Doctor',
-                  timestamp: formatTimer(recordingSeconds || 2),
-                  text: spoken.trim(),
-                  language: 'hi'
-                }
-              ]);
-            }
-          };
+            rec.onresult = (evt: any) => {
+              const spoken = Array.from(evt.results)
+                .map((r: any) => r[0].transcript)
+                .join(' ')
+                .trim();
+              if (spoken.length > 0) {
+                currentTurnTextRef.current = spoken;
+                liveCapturedTextRef.current = spoken;
+                const livePreview: TranscriptSegment = {
+                  id: 'live-rec-active',
+                  speaker: activeSpeakerRef.current,
+                  timestamp: formatTimer(recordingSecondsRef.current || 1),
+                  text: spoken,
+                  language: sttLanguage === 'auto' ? 'Mixed' : sttLanguage,
+                };
+                setTranscript([...liveTurnsRef.current, livePreview]);
+              }
+            };
 
-          rec.onerror = () => {};
-          rec.start();
-          speechRecognitionRef.current = rec;
-        } catch (e) {
-          // Fallback to Whisper after stop
-        }
+            rec.onend = () => {
+              // Automatically resume if still actively recording (handles speaker-switch restarts)
+              if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+                startRecognizer();
+              }
+            };
+            rec.onerror = () => {};
+            rec.start();
+            speechRecognitionRef.current = rec;
+          } catch {}
+        };
+        startRecognizer();
       }
     } catch (err: any) {
       console.warn('Microphone permission error:', err);
       setIsRecording(true);
       setIsPaused(false);
-      setStatusMessage('Microphone capturing simulated input.');
+      setStatusMessage('Microphone permission denied or unavailable. Use "Load Knee-Pain Benchmark" or "+ Custom Line".');
     }
   };
 
@@ -221,15 +278,34 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
     setIsPaused(!isPaused);
   };
 
-  // Stop Recording and trigger STT transcription via /api/consultations/CON-TEMP/transcribe
+  // Stop Recording and trigger STT transcription + AI Diarization via /api/consultations/CON-TEMP/transcribe
   const handleStopRecording = () => {
     setIsRecording(false);
     setIsPaused(false);
     if (timerRef.current) clearInterval(timerRef.current);
 
-    if (speechRecognitionRef.current) {
-      try { speechRecognitionRef.current.stop(); } catch (e) {}
+    if (currentTurnTextRef.current.trim().length > 0) {
+      liveTurnsRef.current = [
+        ...liveTurnsRef.current,
+        {
+          id: `live-turn-${Date.now()}`,
+          speaker: activeSpeakerRef.current,
+          timestamp: formatTimer(recordingSecondsRef.current || 2),
+          text: currentTurnTextRef.current.trim(),
+          language: sttLanguage === 'auto' ? 'Mixed' : sttLanguage,
+        },
+      ];
+      currentTurnTextRef.current = '';
     }
+
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.onend = null;
+        speechRecognitionRef.current.stop();
+      } catch {}
+    }
+
+    const capturedLiveTurns = [...liveTurnsRef.current];
 
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.onstop = async () => {
@@ -242,12 +318,36 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
         }
 
         setIsTranscribing(true);
-        setStatusMessage('Transcribing captured voice with Groq Whisper Large-V3...');
+        setStatusMessage(
+          recordingMode === 'ambient_ai'
+            ? 'Transcribing consultation with Groq Whisper + AI Doctor/Patient Speaker Diarization...'
+            : 'Transcribing Doctor dictation with Groq Whisper Large-V3...'
+        );
 
         const reader = new FileReader();
         reader.readAsDataURL(audioBlob);
         reader.onloadend = async () => {
           const base64 = reader.result as string;
+          // Persist audio recording permanently on disk for Doctor, Patient & Admin playback
+          fetch('/api/audio', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              audioBase64: base64,
+              mimeType: audioBlob.type || 'audio/webm',
+              consultationId: activePatient?.id || 'CON',
+              duration: recordingSecondsRef.current,
+            }),
+          })
+            .then(r => r.json())
+            .then(aData => {
+              if (aData.audioUrl) {
+                setPersistedAudioUrl(aData.audioUrl);
+                setAudioUrl(aData.audioUrl);
+              }
+            })
+            .catch(err => console.warn('Could not persist audio file:', err));
+
           try {
             const res = await fetch('/api/consultations/CON-TEMP/transcribe', {
               method: 'POST',
@@ -255,30 +355,38 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
               body: JSON.stringify({
                 audioBase64: base64,
                 mimeType: audioBlob.type || 'audio/webm',
+                language: sttLanguage === 'auto' ? undefined : sttLanguage,
                 providerOverride: transcriptionProvider || 'groq',
-                defaultSpeaker: 'Doctor'
+                defaultSpeaker: 'Doctor',
+                diarizationMode: recordingMode,
               }),
             });
 
             const data = await res.json();
             if (data.transcript && data.transcript.length > 0) {
               setTranscript(data.transcript);
-              setTranscriptionEngineUsed(data.providerUsed || 'Groq Whisper-Large-V3 [LIVE Free Engine]');
+              setTranscriptionEngineUsed(data.providerUsed || 'Groq Whisper-Large-V3 [LIVE]');
               setDetectedLang(data.detectedLanguage || 'Mixed Hindi/English');
-              setStatusMessage(`✓ Speech recognized via ${data.providerUsed}!`);
-            } else if (liveCapturedTextRef.current && liveCapturedTextRef.current.trim().length > 0) {
-              // Real voice words captured by live microphone!
-              setTranscript([
-                {
-                  id: 'live-stt-1',
-                  speaker: 'Doctor',
-                  timestamp: formatTimer(recordingSeconds || 2),
-                  text: liveCapturedTextRef.current.trim(),
-                  language: 'hi'
-                }
-              ]);
-              setTranscriptionEngineUsed('Browser Microphone Recognition [LIVE]');
-              setStatusMessage('✓ Voice captured directly from your microphone!');
+              setStatusMessage(`✓ Conversation transcribed via ${data.providerUsed}! Click "Run AI Extraction" to summarize into final PDF draft.`);
+            } else if (capturedLiveTurns.length > 0) {
+              // Run AI diarization on live browser speech segments if ambient mode was active
+              if (recordingMode === 'ambient_ai') {
+                const diarRes = await fetch('/api/consultations/CON-TEMP/transcribe', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    diarizationMode: 'ambient_ai',
+                    rawSegmentsToDiarize: capturedLiveTurns,
+                  }),
+                });
+                const diarData = await diarRes.json();
+                setTranscript(diarData.transcript?.length ? diarData.transcript : capturedLiveTurns);
+                setTranscriptionEngineUsed(diarData.providerUsed || 'Browser Live Speech + AI Diarization');
+              } else {
+                setTranscript(capturedLiveTurns);
+                setTranscriptionEngineUsed('Browser Microphone Recognition [LIVE]');
+              }
+              setStatusMessage('✓ Live consultation speech captured and ready for AI Summarization!');
             } else {
               setTranscript([]);
               setTranscriptionEngineUsed('Microphone (No audible words detected)');
@@ -286,16 +394,8 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
             }
           } catch (err) {
             console.warn('Transcription error:', err);
-            if (liveCapturedTextRef.current && liveCapturedTextRef.current.trim().length > 0) {
-              setTranscript([
-                {
-                  id: 'live-stt-1',
-                  speaker: 'Doctor',
-                  timestamp: formatTimer(recordingSeconds || 2),
-                  text: liveCapturedTextRef.current.trim(),
-                  language: 'hi'
-                }
-              ]);
+            if (capturedLiveTurns.length > 0) {
+              setTranscript(capturedLiveTurns);
               setTranscriptionEngineUsed('Browser Microphone Recognition [LIVE]');
             } else {
               setTranscript([]);
@@ -309,17 +409,8 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
 
       mediaRecorderRef.current.stop();
     } else {
-      // Fallback if no physical media recorder
-      if (liveCapturedTextRef.current && liveCapturedTextRef.current.trim().length > 0) {
-        setTranscript([
-          {
-            id: 'live-stt-1',
-            speaker: 'Doctor',
-            timestamp: formatTimer(recordingSeconds || 2),
-            text: liveCapturedTextRef.current.trim(),
-            language: 'hi'
-          }
-        ]);
+      if (capturedLiveTurns.length > 0) {
+        setTranscript(capturedLiveTurns);
         setTranscriptionEngineUsed('Browser Microphone Recognition [LIVE]');
         setStatusMessage('✓ Voice captured from microphone!');
       } else {
@@ -357,6 +448,25 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
       reader.readAsDataURL(file);
       reader.onloadend = async () => {
         const base64 = reader.result as string;
+        fetch('/api/audio', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            audioBase64: base64,
+            mimeType: file.type || 'audio/webm',
+            consultationId: activePatient?.id || 'UPLOAD',
+            duration: 60,
+          }),
+        })
+          .then(r => r.json())
+          .then(aData => {
+            if (aData.audioUrl) {
+              setPersistedAudioUrl(aData.audioUrl);
+              setAudioUrl(aData.audioUrl);
+            }
+          })
+          .catch(() => {});
+
         try {
           const res = await fetch('/api/consultations/CON-TEMP/transcribe', {
             method: 'POST',
@@ -364,8 +474,10 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
             body: JSON.stringify({
               audioBase64: base64,
               mimeType: file.type || 'audio/webm',
+              language: sttLanguage === 'auto' ? undefined : sttLanguage,
               providerOverride: transcriptionProvider || 'groq',
-              defaultSpeaker: 'Doctor'
+              defaultSpeaker: 'Doctor',
+              diarizationMode: recordingMode
             }),
           });
           const data = await res.json();
@@ -458,6 +570,7 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
       consentTimestamp: new Date().toISOString(),
       consentBy: `${activePatient.name} (Patient Consent)`,
       audioDuration: recordingSeconds,
+      audioUrl: persistedAudioUrl || undefined,
       status: 'pending_approval', // Strictly pending doctor approval!
       branch: activePatient.branch,
       language: 'Mixed',
@@ -601,8 +714,54 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
 
       {/* Audio Capture Console */}
       <div className="bg-revonix-850/90 border border-revonix-700/60 rounded-2xl p-6 shadow-sm space-y-5">
+        {/* Top Row: Recording Mode & Speech Language */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-4 border-b border-revonix-800">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-1">Capture Mode:</span>
+            <button
+              type="button"
+              disabled={isRecording}
+              onClick={() => setRecordingMode('ambient_ai')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all ${
+                recordingMode === 'ambient_ai'
+                  ? 'bg-purple-600/30 border-purple-500 text-purple-200 shadow-sm'
+                  : 'bg-revonix-900 border-revonix-700 text-slate-400 hover:text-white'
+              } ${isRecording ? 'opacity-60 cursor-not-allowed' : ''}`}
+            >
+              👥 Doctor–Patient Conversation (AI Diarized)
+            </button>
+            <button
+              type="button"
+              disabled={isRecording}
+              onClick={() => setRecordingMode('doctor_dictation')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all ${
+                recordingMode === 'doctor_dictation'
+                  ? 'bg-indigo-600/30 border-indigo-500 text-indigo-200 shadow-sm'
+                  : 'bg-revonix-900 border-revonix-700 text-slate-400 hover:text-white'
+              } ${isRecording ? 'opacity-60 cursor-not-allowed' : ''}`}
+            >
+              👨‍⚕️ Doctor Dictation Only
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-[11px] text-slate-400 font-semibold">Speech Language:</span>
+            <select
+              value={sttLanguage}
+              disabled={isRecording}
+              onChange={(e) => setSttLanguage(e.target.value as any)}
+              className="bg-revonix-900 border border-revonix-700 rounded-lg px-2.5 py-1 text-xs text-white font-semibold focus:outline-none focus:border-revonix-purple-500"
+            >
+              <option value="auto">Auto / Hinglish-Marathi-English</option>
+              <option value="en">English (Indian OPD)</option>
+              <option value="hi">Hindi (हिंदी)</option>
+              <option value="mr">Marathi (मराठी)</option>
+            </select>
+          </div>
+        </div>
+
         <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center gap-4">
             {/* Record / Stop Button */}
             {!isRecording ? (
               <button
@@ -618,7 +777,7 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
                 <span>Start Voice Recording</span>
               </button>
             ) : (
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   onClick={handleStopRecording}
                   className="flex items-center gap-2 px-5 py-3 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-bold text-sm shadow-xl shadow-red-900/50 recording-pulse"
@@ -634,6 +793,33 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
                 >
                   {isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
                 </button>
+
+                {recordingMode === 'ambient_ai' && (
+                  <div className="flex items-center gap-1 bg-revonix-900 border border-revonix-700 rounded-xl p-1 ml-1">
+                    <button
+                      type="button"
+                      onClick={() => handleSwitchLiveSpeaker('Doctor')}
+                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition-all ${
+                        activeLiveSpeaker === 'Doctor'
+                          ? 'bg-purple-600 text-white shadow'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      👨‍⚕️ Doctor Speaking
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSwitchLiveSpeaker('Patient')}
+                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition-all ${
+                        activeLiveSpeaker === 'Patient'
+                          ? 'bg-cyan-600 text-white shadow'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      🧑 Patient Speaking
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -911,6 +1097,30 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
                     {extractionResult.providerUsed}
                   </span>
                 </div>
+
+                {/* Exact Doctor-Patient Conversation Summary Card */}
+                {extractionResult.conversationSummary && (
+                  <div className="p-3.5 rounded-xl bg-gradient-to-br from-purple-950/60 to-indigo-950/40 border border-purple-500/50 space-y-2 shadow-sm">
+                    <div className="font-bold text-purple-200 text-xs flex items-center justify-between">
+                      <span>💬 Exact Doctor–Patient Conversation Summary (For Final PDF)</span>
+                    </div>
+                    <p className="text-slate-100 leading-relaxed text-[11.5px]">
+                      {extractionResult.conversationSummary}
+                    </p>
+                    {extractionResult.keyDiscussionPoints && extractionResult.keyDiscussionPoints.length > 0 && (
+                      <div className="pt-2 border-t border-purple-500/30 space-y-1.5">
+                        <div className="text-[10px] font-bold uppercase text-purple-300">Key Discussion Exchanges:</div>
+                        {extractionResult.keyDiscussionPoints.map((pt, idx) => (
+                          <div key={idx} className="p-2 rounded-lg bg-slate-950/60 border border-purple-800/40 text-[11px] space-y-0.5">
+                            <div className="font-bold text-purple-300">{pt.topic}</div>
+                            <div className="text-cyan-200"><span className="font-semibold">Patient:</span> {pt.patientStatement}</div>
+                            <div className="text-slate-200"><span className="font-semibold text-purple-200">Doctor:</span> {pt.doctorStatement}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Safety Flags Warning Box (Rule 5) */}
                 {extractionResult.flags && extractionResult.flags.length > 0 && (

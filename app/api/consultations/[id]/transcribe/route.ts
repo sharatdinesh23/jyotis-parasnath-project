@@ -12,7 +12,9 @@ export async function POST(req: Request, { params }: { params: { id: string } })
       providerOverride: body.providerOverride,
       apiKeyOverride: body.apiKeyOverride,
       isKneePainBenchmark: body.isKneePainBenchmark,
-      defaultSpeaker: body.defaultSpeaker || 'Doctor'
+      defaultSpeaker: body.defaultSpeaker || 'Doctor',
+      diarizationMode: body.diarizationMode,
+      rawSegmentsToDiarize: body.rawSegmentsToDiarize
     });
 
     const consultation = clinicStore.getConsultationById(params.id);

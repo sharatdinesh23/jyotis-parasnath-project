@@ -19,7 +19,7 @@ import {
   ArrowRight
 } from 'lucide-react';
 import { exportCRMToExcel } from '@/lib/excelExport';
-import { generateCasePaperPDF, generatePrescriptionPDF } from '@/lib/pdfGenerator';
+import { generateCasePaperPDF, generatePrescriptionPDF, generateFinalSummaryPrescriptionPDF } from '@/lib/pdfGenerator';
 
 interface PatientCRMViewProps {
   patients: Patient[];
@@ -274,15 +274,36 @@ export const PatientCRMView: React.FC<PatientCRMViewProps> = ({
                           </div>
                         </div>
 
+                        {/* Stored Consultation Audio Recording */}
+                        {c.audioUrl && (
+                          <div className="p-2.5 rounded-lg bg-revonix-950/90 border border-purple-500/40 space-y-1 text-xs">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300 block">
+                              🎧 Recorded Consultation Audio ({c.audioDuration || 0}s)
+                            </span>
+                            <audio controls src={c.audioUrl} className="w-full h-8" />
+                          </div>
+                        )}
+
                         {/* Document Actions */}
                         <div className="flex items-center justify-between pt-2 border-t border-revonix-800 text-xs">
                           <span className="text-slate-400 text-[11px]">
                             Next Follow-up: <strong>{c.prescription.followUpDate || 'None'}</strong>
                           </span>
 
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             {isApproved ? (
                               <>
+                                <button
+                                  onClick={() => {
+                                    const doc = generateFinalSummaryPrescriptionPDF(c);
+                                    doc.save(`FinalSummary_Rx_${c.patientId}_${c.id}.pdf`);
+                                  }}
+                                  className="flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-[11px]"
+                                >
+                                  <FileText className="w-3 h-3 text-white" />
+                                  <span>Summary & Rx PDF</span>
+                                </button>
+
                                 <button
                                   onClick={() => {
                                     const doc = generateCasePaperPDF(c);

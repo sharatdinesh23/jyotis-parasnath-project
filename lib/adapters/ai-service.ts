@@ -22,6 +22,14 @@ Core Directive: You are a clinical documentation assistant, NEVER an autonomous 
 
 You must return a valid JSON object matching this exact structure:
 {
+  "conversationSummary": "A clear, chronological narrative summarizing EXACTLY what the doctor and patient discussed: patient's presenting complaints & history shared, doctor's inquiries & examination findings explained to the patient, clinical assessment, and the exact treatment/prescription/follow-up agreed upon.",
+  "keyDiscussionPoints": [
+    {
+      "topic": "Short topic label (e.g. Primary Pain Complaint, Physical Exam, Medication Advice)",
+      "patientStatement": "What the patient explained or asked",
+      "doctorStatement": "What the doctor observed, answered, or advised"
+    }
+  ],
   "patientSymptomsReported": "String summarizing what the patient stated",
   "durationAndSeverity": "String summarizing duration and severity",
   "relevantMedicalHistory": "String summarizing relevant past medical/surgical history or chronic conditions",
@@ -80,6 +88,119 @@ function cleanAndParseJSON(rawContent: string): any {
   return JSON.parse(cleaned.trim());
 }
 
+async function tryGroqExtraction(
+  apiKey: string,
+  rawModel: string | undefined,
+  systemPrompt: string,
+  transcriptText: string,
+  temperature: number
+): Promise<MedicalExtraction | null> {
+  const groqCandidates = Array.from(new Set([
+    rawModel && !rawModel.includes('gemini') ? rawModel : 'openai/gpt-oss-120b',
+    'openai/gpt-oss-120b',
+    'openai/gpt-oss-20b',
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant'
+  ]));
+
+  for (const groqModel of groqCandidates) {
+    try {
+      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey.trim()}`,
+        },
+        body: JSON.stringify({
+          model: groqModel,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `Extract structured clinical data and an accurate doctor-patient conversationSummary strictly adhering to the schema from this transcript:\n\n${transcriptText}` },
+          ],
+          temperature,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const parsed = cleanAndParseJSON(data.choices[0].message.content);
+        return {
+          ...parsed,
+          providerUsed: `Groq (${groqModel}) [LIVE Free Engine]`
+        };
+      } else {
+        console.warn(`Groq model ${groqModel} returned status ${response.status}`);
+      }
+    } catch (err) {
+      console.warn(`Groq connection error for ${groqModel}:`, err);
+    }
+  }
+  return null;
+}
+
+async function tryGeminiExtraction(
+  apiKey: string,
+  rawModel: string | undefined,
+  systemPrompt: string,
+  transcriptText: string,
+  temperature: number
+): Promise<MedicalExtraction | null> {
+  let initialModel = rawModel && rawModel.includes('gemini') ? rawModel : 'gemini-3.5-flash';
+  if (initialModel === 'gemini-1.5-flash' || initialModel === 'gemini' || initialModel === 'gemini-2.0-flash') {
+    initialModel = 'gemini-3.5-flash';
+  }
+
+  const candidateModels = Array.from(new Set([
+    initialModel,
+    'gemini-3.5-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-flash-latest'
+  ]));
+
+  for (const geminiModel of candidateModels) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey.trim()}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: systemPrompt }]
+          },
+          contents: [{
+            parts: [
+              { text: `Extract structured clinical data and an accurate doctor-patient conversationSummary in pure JSON matching the schema from this consultation transcript:\n\n${transcriptText}` }
+            ]
+          }],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            temperature
+          }
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) {
+          const parsed = cleanAndParseJSON(text);
+          return {
+            ...parsed,
+            providerUsed: `Google Gemini (${geminiModel}) [LIVE Free Studio]`
+          };
+        }
+      } else {
+        const errData = await response.text();
+        console.warn(`Gemini model ${geminiModel} failed (${response.status}):`, errData);
+      }
+    } catch (err) {
+      console.warn(`Gemini error on model ${geminiModel}:`, err);
+    }
+  }
+  return null;
+}
+
 export async function extractMedicalData(req: ExtractionRequest): Promise<MedicalExtraction> {
   const provider = req.providerOverride || process.env.AI_PROVIDER || 'gemini';
   const rawModel = req.modelOverride || process.env.AI_MODEL;
@@ -90,111 +211,30 @@ export async function extractMedicalData(req: ExtractionRequest): Promise<Medica
     .map(t => `[${t.speaker} - ${t.timestamp}]: ${t.text}`)
     .join('\n');
 
-  // 1. GROQ ADAPTER (100% Free, ultra-fast inference)
+  const groqKey = (provider === 'groq' ? req.apiKeyOverride : undefined) || process.env.GROQ_API_KEY;
+  const geminiKey = (provider === 'gemini' ? req.apiKeyOverride : undefined) || process.env.GEMINI_API_KEY;
+
+  // 1. GROQ ADAPTER (+ Automatic Failover to Gemini if Groq unavailable)
   if (provider === 'groq') {
-    const apiKey = req.apiKeyOverride || process.env.GROQ_API_KEY;
-    if (apiKey && apiKey.trim().length > 5) {
-      const groqCandidates = Array.from(new Set([
-        rawModel || 'openai/gpt-oss-120b',
-        'openai/gpt-oss-120b',
-        'openai/gpt-oss-20b',
-        'llama-3.3-70b-versatile',
-        'llama-3.1-8b-instant'
-      ]));
-
-      for (const groqModel of groqCandidates) {
-        try {
-          const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${apiKey.trim()}`,
-            },
-            body: JSON.stringify({
-              model: groqModel,
-              response_format: { type: 'json_object' },
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: `Extract structured clinical data strictly adhering to the schema from this transcript:\n\n${transcriptText}` },
-              ],
-              temperature: temperature,
-            }),
-          });
-
-          if (response.ok) {
-            const data = await response.json();
-            const parsed = cleanAndParseJSON(data.choices[0].message.content);
-            return {
-              ...parsed,
-              providerUsed: `Groq (${groqModel}) [LIVE Free Engine]`
-            };
-          } else {
-            console.warn(`Groq model ${groqModel} returned status ${response.status}`);
-          }
-        } catch (err) {
-          console.warn(`Groq connection error for ${groqModel}:`, err);
-        }
-      }
+    if (groqKey && groqKey.trim().length > 5) {
+      const groqRes = await tryGroqExtraction(groqKey, rawModel, systemPrompt, transcriptText, temperature);
+      if (groqRes) return groqRes;
+    }
+    if (geminiKey && geminiKey.trim().length > 5) {
+      const geminiFailover = await tryGeminiExtraction(geminiKey, undefined, systemPrompt, transcriptText, temperature);
+      if (geminiFailover) return geminiFailover;
     }
   }
 
-  // 2. GOOGLE GEMINI ADAPTER (100% Free, Google AI Studio)
+  // 2. GOOGLE GEMINI ADAPTER (+ Automatic Failover to Groq on 503 high demand)
   if (provider === 'gemini') {
-    const apiKey = req.apiKeyOverride || process.env.GEMINI_API_KEY;
-    if (apiKey && apiKey.trim().length > 5) {
-      let initialModel = rawModel || 'gemini-3.5-flash';
-      // Auto-upgrade deprecated gemini-1.5-flash to active gemini-3.5-flash
-      if (initialModel === 'gemini-1.5-flash' || initialModel === 'gemini' || initialModel === 'gemini-2.0-flash') {
-        initialModel = 'gemini-3.5-flash';
-      }
-
-      const candidateModels = Array.from(new Set([
-        initialModel,
-        'gemini-3.5-flash',
-        'gemini-3.5-flash-lite',
-        'gemini-flash-latest'
-      ]));
-
-      for (const geminiModel of candidateModels) {
-        try {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey.trim()}`;
-          const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              systemInstruction: {
-                parts: [{ text: systemPrompt }]
-              },
-              contents: [{
-                parts: [
-                  { text: `Extract structured clinical data in pure JSON matching the schema from this consultation transcript:\n\n${transcriptText}` }
-                ]
-              }],
-              generationConfig: {
-                responseMimeType: 'application/json',
-                temperature: temperature
-              }
-            })
-          });
-
-          if (response.ok) {
-            const data = await response.json();
-            const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (text) {
-              const parsed = cleanAndParseJSON(text);
-              return {
-                ...parsed,
-                providerUsed: `Google Gemini (${geminiModel}) [LIVE Free Studio]`
-              };
-            }
-          } else {
-            const errData = await response.text();
-            console.warn(`Gemini model ${geminiModel} failed (${response.status}):`, errData);
-          }
-        } catch (err) {
-          console.warn(`Gemini error on model ${geminiModel}:`, err);
-        }
-      }
+    if (geminiKey && geminiKey.trim().length > 5) {
+      const geminiRes = await tryGeminiExtraction(geminiKey, rawModel, systemPrompt, transcriptText, temperature);
+      if (geminiRes) return geminiRes;
+    }
+    if (groqKey && groqKey.trim().length > 5) {
+      const groqFailover = await tryGroqExtraction(groqKey, undefined, systemPrompt, transcriptText, temperature);
+      if (groqFailover) return groqFailover;
     }
   }
 
@@ -291,6 +331,24 @@ function getMockExtraction(transcriptText: string, patientName?: string): Medica
 
   if (isKneePain) {
     return {
+      conversationSummary: `During this outpatient consultation, ${patientName || 'the patient'} explained experiencing persistent right knee pain for 6 months, significantly worsened while climbing or descending stairs and sitting cross-legged, along with 20–25 minutes of morning stiffness, clicking joint sensations, and evening swelling. The patient also noted sensitivity/gastric irritation to strong painkillers and ongoing hypertension medication (Amlodipine 5mg). After examining the right knee—noting medial joint line tenderness, palpable crepitus, and flexion restricted to ~110 degrees—the doctor explained a clinical suspicion of Grade 2 Osteoarthritis (medial compartment). They agreed on an X-Ray (Bilateral Knees AP & Lateral), conservative pain relief with Paracetamol 650mg strictly after food, topical Diclofenac gel, Calcium + Vitamin D3 supplementation, lifestyle modifications (avoiding squatting/Indian toilets), and a 10-day follow-up review.`,
+      keyDiscussionPoints: [
+        {
+          topic: 'Chief Complaint & Daily Impact',
+          patientStatement: 'Right knee pain for 6 months, worse on stairs and sitting cross-legged, with 20-25 min morning stiffness and clicking sounds.',
+          doctorStatement: 'Assessed severity and checked history of gastric sensitivity to NSAIDs.'
+        },
+        {
+          topic: 'Physical Examination & Assessment',
+          patientStatement: 'Confirmed tenderness on palpation along inner knee joint.',
+          doctorStatement: 'Identified medial joint line tenderness, palpable crepitus, and 110° flexion; suspected Grade 2 Osteoarthritis and ordered weight-bearing X-Rays.'
+        },
+        {
+          topic: 'Prescription & Joint Care',
+          patientStatement: 'Requested stomach-safe medication due to acidity history.',
+          doctorStatement: 'Prescribed Dolo 650 after meals, Volini topical gel, Shelcal, warm/ice compresses, and western commode usage.'
+        }
+      ],
       patientSymptomsReported: 'Patient reports persistent right knee pain for 6 months, noticeably exacerbated by descending and climbing stairs and sitting cross-legged on the floor. Associated with morning stiffness lasting approximately 20-25 minutes, clicking joint sensations, and evening puffiness.',
       durationAndSeverity: 'Duration: 6 months. Severity: Moderate to severe, exacerbated by stair climbing, kneeling, and prolonged weight-bearing.',
       relevantMedicalHistory: 'Known hypertensive on Tab Amlodipine 5mg OD. Reports past history of gastric acidity and burning with strong oral painkillers.',
@@ -366,52 +424,105 @@ function getMockExtraction(transcriptText: string, patientName?: string): Medica
     };
   }
 
-  // Generic fallback extraction for any other custom live-recorded consultation
-  const patientLines = transcriptText
-    .split('\n')
-    .filter(l => l.toLowerCase().includes('patient'))
+  // Dynamic contextual extraction fallback for any live-recorded consultation
+  const lines = transcriptText.split('\n').map(l => l.trim()).filter(Boolean);
+  const patientLinesList = lines
+    .filter(l => l.toLowerCase().startsWith('[patient'))
     .map(l => l.replace(/^\[.*?\]:\s*/, '').trim())
-    .filter(Boolean)
-    .join(' ');
+    .filter(Boolean);
 
-  const reportedSymptoms = patientLines.length > 5 
-    ? `Patient reported: ${patientLines}`
+  const doctorLinesList = lines
+    .filter(l => l.toLowerCase().startsWith('[doctor'))
+    .map(l => l.replace(/^\[.*?\]:\s*/, '').trim())
+    .filter(Boolean);
+
+  const patientText = patientLinesList.join(' ');
+  const doctorText = doctorLinesList.join(' ');
+  const fullText = `${patientText} ${doctorText}`.trim() || transcriptText;
+
+  const reportedSymptoms = patientText.length > 3
+    ? patientText
     : 'Patient reported symptoms documented during live voice consultation.';
 
+  // Extract duration cues
+  const durationMatch = fullText.match(/\b(?:since|for)\s+\d+\s*(?:day|days|week|weeks|month|months|year|years|din|mahine)\b/i);
+  const durationAndSeverity = durationMatch
+    ? `Reported duration: ${durationMatch[0]}. Clinical assessment based on live conversation.`
+    : 'Duration and severity as discussed during outpatient consultation.';
+
+  // Extract medicines dynamically (Tab./Cap./Syp./Inj./Gel patterns)
+  const medRegex = /\b(Tab\.?|Tablet|Cap\.?|Capsule|Syp\.?|Syrup|Inj\.?|Gel|Ointment|Drops)\s+([a-zA-Z][a-zA-Z+-]+(?:\s+(?!once|twice|thrice|daily|after|before|for|with|at|od|bd|tds|every)[a-zA-Z][a-zA-Z+-]+)?)\s*(\d+(?:\.\d+)?\s*(?:mg|ml|mcg|gm|g|%))?/gi;
+  const extractedMeds: MedicineItem[] = [];
+  let match: RegExpExecArray | null;
+  let medIdx = 1;
+  while ((match = medRegex.exec(fullText)) !== null) {
+    const rawForm = match[1].toLowerCase();
+    const form: MedicineItem['form'] =
+      rawForm.startsWith('cap') ? 'Capsule' :
+      rawForm.startsWith('syp') || rawForm.startsWith('syr') ? 'Syrup' :
+      rawForm.startsWith('inj') ? 'Injection' :
+      rawForm.startsWith('gel') || rawForm.startsWith('oint') ? 'Gel/Ointment' :
+      rawForm.startsWith('drop') ? 'Drops' : 'Tablet';
+    const medName = `${match[1].replace(/\.$/, '')}. ${match[2]}`.trim();
+    const dosage = match[3] || '';
+    const windowAfter = fullText.slice(match.index, match.index + 120);
+    const freqMatch = windowAfter.match(/\b(1-0-1|1-1-1|1-0-0|0-0-1|OD|BD|TDS|QID|once daily|twice daily|thrice daily)\b/i);
+    const durMatch = windowAfter.match(/\bfor\s+(\d+\s*(?:day|days|week|weeks|month|months))\b/i);
+    const timingMatch = windowAfter.match(/\b(after food|before food|with food|at bedtime|after meals|empty stomach)\b/i);
+
+    extractedMeds.push({
+      id: `med-${medIdx++}`,
+      name: dosage ? `${medName} ${dosage}` : medName,
+      form,
+      dosage: dosage || 'As directed',
+      frequency: freqMatch ? freqMatch[1] : 'As advised',
+      timing: timingMatch && /before|empty/i.test(timingMatch[1]) ? 'Before Food' : timingMatch && /bedtime/i.test(timingMatch[1]) ? 'At Bedtime' : 'After Food',
+      duration: durMatch ? durMatch[1] : 'As advised',
+      instructions: 'Take strictly as advised by attending doctor.',
+      flagged: !dosage || !freqMatch,
+      flagReason: !dosage || !freqMatch ? 'Verify dosage/frequency before final approval' : undefined
+    });
+  }
+
+  const narrativeParts: string[] = [];
+  if (patientText) narrativeParts.push(`During the consultation, ${patientName || 'the patient'} stated: "${patientText}".`);
+  if (doctorText) narrativeParts.push(`The attending doctor examined and advised: "${doctorText}".`);
+
+  const discussionPoints = [];
+  if (patientText || doctorText) {
+    discussionPoints.push({
+      topic: 'Clinical Consultation Summary',
+      patientStatement: patientText || 'Presented symptoms during consultation.',
+      doctorStatement: doctorText || 'Evaluated symptoms and advised treatment plan.'
+    });
+  }
+
   return {
+    conversationSummary: narrativeParts.length > 0
+      ? narrativeParts.join(' ')
+      : 'Doctor and patient completed a clinical consultation covering presenting symptoms, examination, and prescribed management.',
+    keyDiscussionPoints: discussionPoints,
     patientSymptomsReported: reportedSymptoms,
-    durationAndSeverity: 'Duration: Recent onset. Severity: Moderate.',
-    relevantMedicalHistory: 'Non-contributory past history noted.',
-    doctorClinicalObservations: 'Physical examination performed. Vitals stable.',
-    suspectedDiagnoses: ['Under clinical evaluation'],
+    durationAndSeverity,
+    relevantMedicalHistory: 'As recorded in patient history and consultation dialogue.',
+    doctorClinicalObservations: doctorText || 'Clinical evaluation documented by attending doctor.',
+    suspectedDiagnoses: ['Clinical evaluation documented (Awaiting Doctor confirmation)'],
     confirmedDiagnoses: [],
-    treatmentRecommendations: ['Rest and symptomatic relief', 'Diagnostic tests as advised'],
-    medicinesMentioned: [
-      {
-        id: 'med-1',
-        name: 'Tab. Paracetamol 650mg',
-        form: 'Tablet',
-        dosage: '650 mg',
-        frequency: '1-0-1',
-        timing: 'After Food',
-        duration: '3 days',
-        instructions: 'Take after food',
-        flagged: false
-      }
-    ],
-    lifestyleDietInstructions: ['Adequate hydration and balanced diet', 'Sufficient rest'],
-    followUpRecommendation: 'Follow up in 7 days or earlier if symptoms persist.',
+    treatmentRecommendations: doctorText ? [doctorText] : ['Symptomatic management and follow-up as advised'],
+    medicinesMentioned: extractedMeds,
+    lifestyleDietInstructions: ['Adequate hydration and rest as advised during consultation'],
+    followUpRecommendation: 'Follow up as advised or earlier if symptoms worsen.',
     followUpDate: new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
     flags: [
       {
         id: 'fl-1',
         type: 'low_confidence',
-        message: 'Mock extraction executed without live LLM API keys. Add your free GROQ_API_KEY or GEMINI_API_KEY in .env to enable live LLaMA-3.3 or Gemini extraction.',
+        message: 'Live LLM API key returned unauthorized/unavailable; local clinical parser generated this draft from your exact consultation transcript. Update GEMINI_API_KEY or GROQ_API_KEY in .env for deep AI synthesis.',
         field: 'general',
         resolved: false
       }
     ],
-    providerUsed: 'Mock AI Adapter (Synthetic Clinical Demo)'
+    providerUsed: 'Local Clinical Transcript Parser (Fallback)'
   };
 }
 

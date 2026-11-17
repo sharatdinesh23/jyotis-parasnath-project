@@ -26,9 +26,10 @@ import {
   User,
   Calendar,
   Lock,
-  Unlock
+  Unlock,
+  Volume2
 } from 'lucide-react';
-import { generateCasePaperPDF, generatePrescriptionPDF } from '@/lib/pdfGenerator';
+import { generateCasePaperPDF, generatePrescriptionPDF, generateFinalSummaryPrescriptionPDF } from '@/lib/pdfGenerator';
 
 interface ApprovalsViewProps {
   consultations: Consultation[];
@@ -143,6 +144,15 @@ export const ApprovalsView: React.FC<ApprovalsViewProps> = ({
     }
   };
 
+  const handleDownloadFinalSummary = () => {
+    try {
+      const doc = generateFinalSummaryPrescriptionPDF(selectedConsultation);
+      doc.save(`FinalSummary_Rx_${selectedConsultation.patientId}_${selectedConsultation.id}.pdf`);
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
   return (
     <div className="space-y-5 max-w-6xl mx-auto">
       {/* Friendly Top Header with Low Cognitive Load */}
@@ -182,11 +192,19 @@ export const ApprovalsView: React.FC<ApprovalsViewProps> = ({
               </button>
             </>
           ) : (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-950/80 text-emerald-300 border border-emerald-600/50 text-xs font-bold">
                 <ShieldCheck className="w-4 h-4 text-emerald-400" />
                 <span>Approved & Signed</span>
               </span>
+
+              <button
+                onClick={handleDownloadFinalSummary}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold shadow-lg shadow-emerald-900/30 transition-all"
+              >
+                <FileDown className="w-3.5 h-3.5" />
+                <span>Final Summary & Rx PDF</span>
+              </button>
 
               <button
                 onClick={handleDownloadCasePaper}
@@ -402,6 +420,18 @@ export const ApprovalsView: React.FC<ApprovalsViewProps> = ({
 
           {/* Clinical Sections */}
           <div className="space-y-4 text-xs">
+            {/* Exact Doctor-Patient Conversation Summary */}
+            {selectedConsultation.extraction?.conversationSummary && (
+              <div className="p-3.5 rounded-xl bg-gradient-to-br from-purple-950/50 to-indigo-950/30 border border-purple-500/40 space-y-1.5">
+                <span className="font-bold text-purple-200 uppercase text-[11px] block">
+                  💬 Doctor–Patient Conversation Summary (Included in Final PDF)
+                </span>
+                <p className="text-slate-100 leading-relaxed">
+                  {selectedConsultation.extraction.conversationSummary}
+                </p>
+              </div>
+            )}
+
             {/* Chief Complaints & HPI */}
             <div className="space-y-1.5">
               <span className="font-bold text-purple-300 uppercase text-[11px] block">
@@ -611,14 +641,35 @@ export const ApprovalsView: React.FC<ApprovalsViewProps> = ({
       {/* TAB 3: TRANSCRIPT */}
       {activeTab === 'transcript' && (
         <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
-          <div className="border-b border-slate-800 pb-3">
-            <h3 className="font-bold text-white text-base">
-              Consultation Voice Transcript
-            </h3>
-            <p className="text-xs text-slate-400">
-              Diarised multilingual audio transcript.
-            </p>
+          <div className="border-b border-slate-800 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="font-bold text-white text-base">
+                Consultation Voice Transcript & Audio Recording
+              </h3>
+              <p className="text-xs text-slate-400">
+                Diarised multilingual audio transcript and stored voice recording.
+              </p>
+            </div>
           </div>
+
+          {selectedConsultation.audioUrl && (
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-purple-500/40 space-y-1.5">
+              <div className="flex items-center justify-between text-xs text-purple-200 font-bold">
+                <span className="flex items-center gap-1.5">
+                  <Volume2 className="w-4 h-4 text-purple-400" />
+                  <span>Stored Consultation Audio Recording</span>
+                </span>
+                <a
+                  href={selectedConsultation.audioUrl}
+                  download={`Consultation_${selectedConsultation.id}.webm`}
+                  className="text-[11px] text-cyan-400 hover:underline font-semibold"
+                >
+                  Download Audio
+                </a>
+              </div>
+              <audio controls src={selectedConsultation.audioUrl} className="w-full h-9" />
+            </div>
+          )}
 
           <div className="space-y-2.5">
             {selectedConsultation.transcript.map((seg, idx) => {

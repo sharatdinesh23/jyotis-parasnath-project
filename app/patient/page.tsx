@@ -24,7 +24,7 @@ import {
   CheckCircle2,
   Play
 } from 'lucide-react';
-import { generateCasePaperPDF, generatePrescriptionPDF } from '@/lib/pdfGenerator';
+import { generateCasePaperPDF, generatePrescriptionPDF, generateFinalSummaryPrescriptionPDF } from '@/lib/pdfGenerator';
 import { PatientVoiceNoteRecorder } from '@/components/PatientVoiceNoteRecorder';
 
 export default function PatientPortalPage() {
@@ -124,6 +124,15 @@ export default function PatientPortalPage() {
     try {
       const doc = generatePrescriptionPDF(c);
       doc.save(`My_Prescription_${c.id}.pdf`);
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleDownloadFinalSummary = (c: Consultation) => {
+    try {
+      const doc = generateFinalSummaryPrescriptionPDF(c);
+      doc.save(`My_Consultation_Summary_Rx_${c.id}.pdf`);
     } catch (err: any) {
       alert(err.message);
     }
@@ -398,21 +407,49 @@ export default function PatientPortalPage() {
                         </div>
                       )}
 
+                      {/* Stored Consultation Audio Recording (Available Anytime) */}
+                      {c.audioUrl && (
+                        <div className="p-3 rounded-lg bg-slate-900/90 border border-cyan-500/40 space-y-1.5">
+                          <div className="flex items-center justify-between text-[11px] font-bold text-cyan-300">
+                            <span className="flex items-center gap-1.5">
+                              <Volume2 className="w-3.5 h-3.5" />
+                              <span>Consultation Audio Recording ({c.audioDuration || 0}s)</span>
+                            </span>
+                            <a
+                              href={c.audioUrl}
+                              download={`My_Consultation_${c.id}.webm`}
+                              className="text-[10px] text-cyan-400 hover:underline"
+                            >
+                              Download Audio
+                            </a>
+                          </div>
+                          <audio controls src={c.audioUrl} className="w-full h-8" />
+                        </div>
+                      )}
+
                       {/* Download PDF Buttons */}
                       <div className="flex items-center justify-between pt-2 border-t border-slate-800/80 text-xs">
                         <span className="text-slate-400 text-[11px]">
                           {isApproved ? 'Official clinic documents ready' : 'PDF locked until doctor approval'}
                         </span>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           {isApproved ? (
                             <>
+                              <button
+                                onClick={() => handleDownloadFinalSummary(c)}
+                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold transition-colors shadow"
+                              >
+                                <FileDown className="w-3.5 h-3.5" />
+                                <span>Complete Summary & Rx PDF</span>
+                              </button>
+
                               <button
                                 onClick={() => handleDownloadCasePaper(c)}
                                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition-colors"
                               >
                                 <FileDown className="w-3.5 h-3.5" />
-                                <span>Download Case Paper</span>
+                                <span>Case Paper</span>
                               </button>
 
                               <button
@@ -420,7 +457,7 @@ export default function PatientPortalPage() {
                                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors"
                               >
                                 <FileDown className="w-3.5 h-3.5" />
-                                <span>Download Prescription</span>
+                                <span>Prescription</span>
                               </button>
                             </>
                           ) : (

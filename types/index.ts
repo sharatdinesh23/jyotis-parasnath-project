@@ -79,6 +79,12 @@ export interface ExtractionFlag {
 }
 
 export interface MedicalExtraction {
+  conversationSummary?: string;
+  keyDiscussionPoints?: Array<{
+    topic: string;
+    patientStatement: string;
+    doctorStatement: string;
+  }>;
   patientSymptomsReported: string;
   durationAndSeverity: string;
   relevantMedicalHistory: string;

@@ -94,6 +94,7 @@ db.exec(`
     consentTimestamp TEXT,
     consentBy TEXT,
     audioDuration INTEGER DEFAULT 0,
+    audioUrl TEXT,
     status TEXT NOT NULL,
     branch TEXT NOT NULL,
     language TEXT NOT NULL,
@@ -145,6 +146,10 @@ db.exec(`
     createdAt TEXT NOT NULL
   );
 `);
+
+try {
+  db.exec(`ALTER TABLE consultations ADD COLUMN audioUrl TEXT;`);
+} catch {}
 
 // Seed default users if empty
 const userCount = db.prepare('SELECT count(*) as count FROM users').get() as { count: number };
@@ -440,12 +445,14 @@ export function saveConsultationRecord(c: Consultation) {
     db.prepare(`
       UPDATE consultations SET
         doctorName = ?, status = ?, version = ?, approvedBy = ?, approvedAt = ?,
-        rejectionReason = ?, transcript = ?, extraction = ?, casePaper = ?,
+        rejectionReason = ?, audioDuration = ?, audioUrl = COALESCE(?, audioUrl),
+        transcript = ?, extraction = ?, casePaper = ?,
         prescription = ?, deliveryStatus = ?
       WHERE id = ?
     `).run(
       c.doctorName, c.status, (c.version || 1) + 1, c.approvedBy || null,
-      c.approvedAt || null, c.rejectionReason || null, JSON.stringify(c.transcript),
+      c.approvedAt || null, c.rejectionReason || null, c.audioDuration || 0, c.audioUrl || null,
+      JSON.stringify(c.transcript),
       JSON.stringify(c.extraction), JSON.stringify(c.casePaper),
       JSON.stringify(c.prescription), JSON.stringify(c.deliveryStatus),
       c.id
@@ -454,14 +461,14 @@ export function saveConsultationRecord(c: Consultation) {
     db.prepare(`
       INSERT INTO consultations (
         id, patientId, doctorId, doctorName, date, consentRecorded,
-        consentTimestamp, consentBy, audioDuration, status, branch, language,
+        consentTimestamp, consentBy, audioDuration, audioUrl, status, branch, language,
         version, approvedBy, approvedAt, rejectionReason, transcript,
         extraction, casePaper, prescription, deliveryStatus
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       c.id, c.patientId, c.doctorId, c.doctorName, c.date,
       c.consentRecorded ? 1 : 0, c.consentTimestamp || null, c.consentBy || null,
-      c.audioDuration || 0, c.status, c.branch, c.language, c.version || 1,
+      c.audioDuration || 0, c.audioUrl || null, c.status, c.branch, c.language, c.version || 1,
       c.approvedBy || null, c.approvedAt || null, c.rejectionReason || null,
       JSON.stringify(c.transcript), JSON.stringify(c.extraction),
       JSON.stringify(c.casePaper), JSON.stringify(c.prescription),
