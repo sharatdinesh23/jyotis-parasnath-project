@@ -1,7 +1,9 @@
 {
-  "/api/audio/route": "app/api/audio/route.js",
-  "/doctor/page": "app/doctor/page.js",
-  "/api/audio/[filename]/route": "app/api/audio/[filename]/route.js",
   "/admin/page": "app/admin/page.js",
-  "/patient/page": "app/patient/page.js"
+  "/page": "app/page.js",
+  "/doctor/page": "app/doctor/page.js",
+  "/login/page": "app/login/page.js",
+  "/api/consultations/[id]/route": "app/api/consultations/[id]/route.js",
+  "/api/settings/route": "app/api/settings/route.js",
+  "/api/audio/[filename]/route": "app/api/audio/[filename]/route.js"
 }

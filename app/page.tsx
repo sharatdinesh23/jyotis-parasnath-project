@@ -226,12 +226,34 @@ export default function Home() {
     alert(`Consultation rejected and flagged for doctor review.`);
   };
 
-  const handleUpdateCasePaper = (id: string, casePaper: Partial<CasePaper>) => {
+  const handleUpdateCasePaper = async (id: string, casePaper: Partial<CasePaper>) => {
     clinicStore.updateCasePaper(id, casePaper);
+    try {
+      await fetch(`/api/consultations/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ casePaper }),
+      });
+    } catch {}
   };
 
-  const handleUpdatePrescription = (id: string, medicines: MedicineItem[], instructions: string[], followUpDate: string) => {
-    clinicStore.updatePrescription(id, medicines, instructions, followUpDate);
+  const handleUpdatePrescription = async (
+    id: string,
+    medicines: MedicineItem[],
+    instructions: string[],
+    followUpDate: string,
+    dietaryAdvice?: string[]
+  ) => {
+    clinicStore.updatePrescription(id, medicines, instructions, followUpDate, dietaryAdvice);
+    try {
+      await fetch(`/api/consultations/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prescription: { medicines, instructions, followUpDate, dietaryAdvice },
+        }),
+      });
+    } catch {}
   };
 
   const handleSendReminder = (followUpId: string) => {
@@ -277,8 +299,8 @@ export default function Home() {
         />
 
         {/* Dynamic Content Panel (Independently Scrollable) */}
-        <main className="flex-1 h-full overflow-y-auto p-4 sm:p-6 lg:p-8">
-          <div className="max-w-6xl mx-auto">
+        <main className="flex-1 min-w-0 h-full overflow-y-auto overflow-x-hidden p-4 sm:p-6">
+          <div className="max-w-6xl mx-auto min-w-0">
           {activeTab === 'dashboard' && (
             <DashboardView
               currentRole={currentRole}

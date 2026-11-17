@@ -208,14 +208,23 @@ export class ClinicStore {
     }
   }
 
-  public updatePrescription(id: string, medicines: MedicineItem[], instructions: string[], followUpDate: string) {
+  public updatePrescription(
+    id: string,
+    medicines: MedicineItem[],
+    instructions: string[],
+    followUpDate: string,
+    dietaryAdvice?: string[]
+  ) {
     const c = this.consultations.find(item => item.id === id);
     if (c) {
       c.prescription.medicines = medicines;
       c.prescription.instructions = instructions;
       c.prescription.followUpDate = followUpDate;
+      if (dietaryAdvice !== undefined) {
+        c.prescription.dietaryAdvice = dietaryAdvice;
+      }
       c.version = (c.version || 1) + 1;
-      this.addAuditLog('edit', `Doctor updated Prescription medicines for ${id}`);
+      this.addAuditLog('edit', `Doctor updated Prescription for ${id}`);
       this.notify();
     }
   }

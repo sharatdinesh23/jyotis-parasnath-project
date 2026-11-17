@@ -8,7 +8,8 @@ import {
   TranscriptSegment,
   UserRole,
   LanguageCode,
-  MedicalExtraction
+  MedicalExtraction,
+  MedicineItem
 } from '@/types';
 import { getTranslation } from '@/lib/translations';
 import { sampleKneePainConsultation } from '@/lib/seedData';
@@ -29,6 +30,7 @@ import {
   RefreshCw,
   Cpu,
   Plus,
+  Trash2,
   Volume2
 } from 'lucide-react';
 
@@ -80,12 +82,14 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
   // STT & Audio Capture State
   const [recordingMode, setRecordingMode] = useState<'ambient_ai' | 'doctor_dictation'>('ambient_ai');
   const [activeLiveSpeaker, setActiveLiveSpeaker] = useState<'Doctor' | 'Patient'>('Doctor');
-  const [sttLanguage, setSttLanguage] = useState<'auto' | 'en' | 'hi' | 'mr'>('auto');
+  const [sttLanguage, setSttLanguage] = useState<'auto' | 'en' | 'hi' | 'mr'>(currentLanguage || 'en');
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcriptionEngineUsed, setTranscriptionEngineUsed] = useState<string>('Groq Whisper-Large-V3 + AI Diarization [Ready]');
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [persistedAudioUrl, setPersistedAudioUrl] = useState<string | null>(null);
-  const [detectedLang, setDetectedLang] = useState<string>('Mixed Hindi / Marathi / English');
+  const [detectedLang, setDetectedLang] = useState<string>(
+    currentLanguage === 'hi' ? 'Hindi (हिंदी)' : currentLanguage === 'mr' ? 'Marathi (मराठी)' : 'English'
+  );
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -105,6 +109,86 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractionResult, setExtractionResult] = useState<MedicalExtraction | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [isEditingM5Rx, setIsEditingM5Rx] = useState(false);
+
+  const updateM5Medicine = (idx: number, field: keyof MedicineItem, value: string) => {
+    setExtractionResult((prev) => {
+      if (!prev) return prev;
+      const meds = [...prev.medicinesMentioned];
+      meds[idx] = { ...meds[idx], [field]: value } as MedicineItem;
+      return { ...prev, medicinesMentioned: meds };
+    });
+  };
+
+  const addM5Medicine = () => {
+    setExtractionResult((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        medicinesMentioned: [
+          ...prev.medicinesMentioned,
+          {
+            id: `med-${Date.now().toString().slice(-5)}`,
+            name: '',
+            form: 'Tablet',
+            dosage: '',
+            frequency: '1-0-1',
+            timing: 'After Food',
+            duration: '5 days',
+            instructions: '',
+          },
+        ],
+      };
+    });
+    setIsEditingM5Rx(true);
+  };
+
+  const deleteM5Medicine = (idx: number) => {
+    setExtractionResult((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        medicinesMentioned: prev.medicinesMentioned.filter((_, i) => i !== idx),
+      };
+    });
+  };
+
+  // Sync transcription output language when top Navbar language changes
+  const convertTranscriptLanguage = async (nextLang: 'auto' | 'en' | 'hi' | 'mr', sourceSegs?: TranscriptSegment[]) => {
+    setSttLanguage(nextLang);
+    setDetectedLang(
+      nextLang === 'en' ? 'English' : nextLang === 'hi' ? 'Hindi (हिंदी)' : nextLang === 'mr' ? 'Marathi (मराठी)' : 'Auto (HI / MR / EN)'
+    );
+    const segsToConvert = sourceSegs || transcript;
+    if (segsToConvert.length > 0 && nextLang !== 'auto') {
+      setIsTranscribing(true);
+      try {
+        const res = await fetch('/api/consultations/CON-TEMP/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            translateOnly: true,
+            targetLanguage: nextLang,
+            rawSegmentsToDiarize: segsToConvert,
+          }),
+        });
+        const data = await res.json();
+        if (data.transcript && data.transcript.length > 0) {
+          setTranscript(data.transcript);
+          setDetectedLang(data.detectedLanguage || (nextLang === 'en' ? 'English' : nextLang));
+        }
+      } catch {}
+      finally {
+        setIsTranscribing(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (currentLanguage && currentLanguage !== sttLanguage && sttLanguage !== 'auto') {
+      convertTranscriptLanguage(currentLanguage);
+    }
+  }, [currentLanguage]);
 
   // Check STT configuration from server on mount
   useEffect(() => {
@@ -232,7 +316,7 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
             const rec = new SpeechRec();
             rec.continuous = true;
             rec.interimResults = true;
-            rec.lang = sttLanguage === 'en' ? 'en-IN' : sttLanguage === 'mr' ? 'mr-IN' : 'hi-IN';
+            rec.lang = sttLanguage === 'hi' ? 'hi-IN' : sttLanguage === 'mr' ? 'mr-IN' : 'en-IN';
 
             rec.onresult = (evt: any) => {
               const spoken = Array.from(evt.results)
@@ -356,6 +440,7 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
                 audioBase64: base64,
                 mimeType: audioBlob.type || 'audio/webm',
                 language: sttLanguage === 'auto' ? undefined : sttLanguage,
+                targetLanguage: sttLanguage,
                 providerOverride: transcriptionProvider || 'groq',
                 defaultSpeaker: 'Doctor',
                 diarizationMode: recordingMode,
@@ -366,26 +451,23 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
             if (data.transcript && data.transcript.length > 0) {
               setTranscript(data.transcript);
               setTranscriptionEngineUsed(data.providerUsed || 'Groq Whisper-Large-V3 [LIVE]');
-              setDetectedLang(data.detectedLanguage || 'Mixed Hindi/English');
-              setStatusMessage(`✓ Conversation transcribed via ${data.providerUsed}! Click "Run AI Extraction" to summarize into final PDF draft.`);
+              setDetectedLang(data.detectedLanguage || (sttLanguage === 'en' ? 'English' : 'Mixed Hindi/English'));
+              setStatusMessage(`✓ Conversation transcribed in ${data.detectedLanguage || sttLanguage} via ${data.providerUsed}! Click "Run AI Extraction" to summarize into final PDF draft.`);
             } else if (capturedLiveTurns.length > 0) {
-              // Run AI diarization on live browser speech segments if ambient mode was active
-              if (recordingMode === 'ambient_ai') {
-                const diarRes = await fetch('/api/consultations/CON-TEMP/transcribe', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    diarizationMode: 'ambient_ai',
-                    rawSegmentsToDiarize: capturedLiveTurns,
-                  }),
-                });
-                const diarData = await diarRes.json();
-                setTranscript(diarData.transcript?.length ? diarData.transcript : capturedLiveTurns);
-                setTranscriptionEngineUsed(diarData.providerUsed || 'Browser Live Speech + AI Diarization');
-              } else {
-                setTranscript(capturedLiveTurns);
-                setTranscriptionEngineUsed('Browser Microphone Recognition [LIVE]');
-              }
+              // Run AI diarization + language normalization on live browser speech segments
+              const diarRes = await fetch('/api/consultations/CON-TEMP/transcribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  diarizationMode: recordingMode,
+                  targetLanguage: sttLanguage,
+                  rawSegmentsToDiarize: capturedLiveTurns,
+                }),
+              });
+              const diarData = await diarRes.json();
+              setTranscript(diarData.transcript?.length ? diarData.transcript : capturedLiveTurns);
+              setTranscriptionEngineUsed(diarData.providerUsed || 'Browser Live Speech [LIVE]');
+              setDetectedLang(diarData.detectedLanguage || (sttLanguage === 'en' ? 'English' : 'Mixed'));
               setStatusMessage('✓ Live consultation speech captured and ready for AI Summarization!');
             } else {
               setTranscript([]);
@@ -419,15 +501,21 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
     }
   };
 
-  // 1-Click Load Benchmark Knee Pain Audio / Script
-  const handleLoadBenchmarkSample = () => {
+  // 1-Click Load Benchmark Knee Pain Audio / Script (respects chosen output language)
+  const handleLoadBenchmarkSample = async () => {
     setConsentChecked(true);
     setRecordingSeconds(135);
     setAudioUrl(null);
+    setExtractionResult(null);
     setTranscript(sampleKneePainConsultation.transcript);
     setTranscriptionEngineUsed('Benchmark Dataset (Knee Pain Acceptance Case)');
-    setDetectedLang('Mixed Hindi / Marathi / English');
-    setExtractionResult(null);
+
+    if (sttLanguage !== 'auto' && sttLanguage !== 'hi') {
+      setStatusMessage(`Translating benchmark consultation into ${sttLanguage === 'en' ? 'English' : 'Marathi'}...`);
+      await convertTranscriptLanguage(sttLanguage, sampleKneePainConsultation.transcript);
+    } else {
+      setDetectedLang('Hindi / Mixed OPD');
+    }
     setStatusMessage('Loaded official benchmark Knee Pain consultation (Ramesh Joshi, 62M). Ready for AI extraction.');
   };
 
@@ -475,6 +563,7 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
               audioBase64: base64,
               mimeType: file.type || 'audio/webm',
               language: sttLanguage === 'auto' ? undefined : sttLanguage,
+              targetLanguage: sttLanguage,
               providerOverride: transcriptionProvider || 'groq',
               defaultSpeaker: 'Doctor',
               diarizationMode: recordingMode
@@ -745,17 +834,17 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
           </div>
 
           <div className="flex items-center gap-2 text-xs">
-            <span className="text-[11px] text-slate-400 font-semibold">Speech Language:</span>
+            <span className="text-[11px] text-slate-400 font-semibold">Output Language:</span>
             <select
               value={sttLanguage}
               disabled={isRecording}
-              onChange={(e) => setSttLanguage(e.target.value as any)}
+              onChange={(e) => convertTranscriptLanguage(e.target.value as any)}
               className="bg-revonix-900 border border-revonix-700 rounded-lg px-2.5 py-1 text-xs text-white font-semibold focus:outline-none focus:border-revonix-purple-500"
             >
-              <option value="auto">Auto / Hinglish-Marathi-English</option>
-              <option value="en">English (Indian OPD)</option>
+              <option value="en">English (en-IN)</option>
               <option value="hi">Hindi (हिंदी)</option>
               <option value="mr">Marathi (मराठी)</option>
+              <option value="auto">Auto / Original Spoken</option>
             </select>
           </div>
         </div>
@@ -895,36 +984,38 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
       </div>
 
       {/* Transcript & Extraction Two-Column Workspace */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
         {/* Column 1: Diarised Multilingual Transcript (Module 4) */}
-        <div className="bg-revonix-850/80 border border-revonix-700/60 rounded-2xl p-5 space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div>
-              <h3 className="font-bold text-white text-sm flex items-center gap-2">
-                <span>Module 4: Multilingual Transcript</span>
-                <span className="text-[10px] px-2 py-0.5 rounded bg-revonix-purple-900 text-revonix-purple-300 font-mono font-bold">
+        <div className="min-w-0 w-full overflow-hidden bg-revonix-850/80 border border-revonix-700/60 rounded-2xl p-4 sm:p-5 space-y-4">
+          <div className="flex flex-col gap-3 border-b border-revonix-800/80 pb-3">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="font-bold text-white text-sm">
+                  Module 4: Multilingual Transcript
+                </h3>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-revonix-purple-900 text-revonix-purple-300 font-mono font-bold whitespace-nowrap shrink-0">
                   Hindi / Marathi / English
                 </span>
-              </h3>
+              </div>
               <p className="text-[11px] text-slate-400">
                 Timestamped & speaker diarised. Fully editable by doctor before extraction.
               </p>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={handleAddCustomLine}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-revonix-800 hover:bg-revonix-700 text-slate-300 hover:text-white font-semibold text-xs border border-revonix-700 transition-colors"
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-revonix-800 hover:bg-revonix-700 text-slate-300 hover:text-white font-semibold text-xs border border-revonix-700 transition-colors whitespace-nowrap"
                 title="Add custom patient or doctor speech line in Hindi, Marathi, or English"
               >
-                <Plus className="w-3.5 h-3.5 text-revonix-purple-400" />
+                <Plus className="w-3.5 h-3.5 text-revonix-purple-400 shrink-0" />
                 <span>+ Custom Line</span>
               </button>
 
               <button
                 onClick={handleRunAIExtraction}
                 disabled={transcript.length === 0 || isExtracting}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold text-xs shadow transition-all ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold text-xs shadow transition-all whitespace-nowrap ${
                   transcript.length > 0 && !isExtracting
                     ? 'bg-gradient-to-r from-revonix-purple-600 to-indigo-600 hover:from-revonix-purple-500 hover:to-indigo-500 text-white active:scale-95'
                     : 'bg-slate-800 text-slate-500 cursor-not-allowed'
@@ -932,12 +1023,12 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
               >
                 {isExtracting ? (
                   <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
                     <span>Extracting...</span>
                   </>
                 ) : (
                   <>
-                    <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                    <Sparkles className="w-3.5 h-3.5 text-amber-300 shrink-0" />
                     <span>Run AI Extraction (M5)</span>
                   </>
                 )}
@@ -947,13 +1038,13 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
 
           {/* Active STT Engine Status Banner */}
           {transcriptionEngineUsed && (
-            <div className="flex items-center justify-between p-2.5 rounded-xl bg-gradient-to-r from-emerald-950/60 to-slate-900 border border-emerald-500/40 text-emerald-300 text-xs shadow-sm">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                <span className="font-semibold text-white">Transcriber:</span>
-                <span className="font-mono text-emerald-300 font-bold">{transcriptionEngineUsed}</span>
+            <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-gradient-to-r from-emerald-950/60 to-slate-900 border border-emerald-500/40 text-emerald-300 text-xs shadow-sm min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
+                <span className="font-semibold text-white shrink-0">Transcriber:</span>
+                <span className="font-mono text-emerald-300 font-bold break-words">{transcriptionEngineUsed}</span>
               </div>
-              <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-900/60 border border-emerald-700/60 font-mono text-emerald-300">
+              <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-900/60 border border-emerald-700/60 font-mono text-emerald-300 whitespace-nowrap shrink-0">
                 {detectedLang}
               </span>
             </div>
@@ -1058,28 +1149,32 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
         </div>
 
         {/* Column 2: Structured AI Extraction & Flags (Module 5) */}
-        <div className="bg-revonix-850/80 border border-revonix-700/60 rounded-2xl p-5 space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="font-bold text-white text-sm flex items-center gap-2">
-                <span>Module 5: Medical AI Extraction</span>
-                <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 font-bold">
+        <div className="min-w-0 w-full overflow-hidden bg-revonix-850/80 border border-revonix-700/60 rounded-2xl p-4 sm:p-5 space-y-4">
+          <div className="flex flex-col gap-3 border-b border-revonix-800/80 pb-3">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="font-bold text-white text-sm">
+                  Module 5: Medical AI Extraction
+                </h3>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 font-bold whitespace-nowrap shrink-0">
                   JSON Schema
                 </span>
-              </h3>
+              </div>
               <p className="text-[11px] text-slate-400">
                 Symptoms, examination, suspected vs confirmed, medicines & safety flags.
               </p>
             </div>
 
             {extractionResult && (
-              <button
-                onClick={handleSaveAndSendToApproval}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow transition-all"
-              >
-                <span>Send to Doctor Approvals</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={handleSaveAndSendToApproval}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow transition-all whitespace-nowrap"
+                >
+                  <span>Send to Doctor Approvals</span>
+                  <ArrowRight className="w-3.5 h-3.5 shrink-0" />
+                </button>
+              </div>
             )}
           </div>
 
@@ -1188,43 +1283,165 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
                   </div>
                 </div>
 
-                {/* Medicines Mentioned (Rule 2: Never invent medicines/doses) */}
-                <div className="p-3 rounded-xl bg-revonix-900/60 border border-revonix-700/40 space-y-2">
-                  <div className="font-bold text-emerald-300 text-[11px] uppercase flex items-center justify-between">
-                    <span>Medicines Extracted (Only Doctor-Confirmed)</span>
-                    <span className="text-[10px] text-slate-400">
-                      {extractionResult.medicinesMentioned.length} items
-                    </span>
-                  </div>
-                  <div className="space-y-1.5">
-                    {extractionResult.medicinesMentioned.map((med) => (
-                      <div
-                        key={med.id}
-                        className="p-2 rounded-lg bg-revonix-850 border border-revonix-700/70 flex items-center justify-between text-[11px]"
+                {/* Medicines Mentioned (Rule 2: Never invent medicines/doses — Doctor editable) */}
+                <div className="p-3 rounded-xl bg-revonix-900/60 border border-revonix-700/40 space-y-2.5">
+                  <div className="font-bold text-emerald-300 text-[11px] uppercase flex flex-wrap items-center justify-between gap-2">
+                    <span>Medicines Extracted ({extractionResult.medicinesMentioned.length})</span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingM5Rx((v) => !v)}
+                        className="px-2 py-0.5 rounded bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/40 text-purple-200 text-[10px] font-semibold flex items-center gap-1"
                       >
-                        <div>
-                          <div className="font-bold text-white">{med.name}</div>
-                          <div className="text-[10px] text-slate-400">
-                            {med.dosage} • {med.frequency} • {med.timing} • {med.duration}
+                        <Edit3 className="w-3 h-3" />
+                        <span>{isEditingM5Rx ? 'Done' : 'Edit Rx'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={addM5Medicine}
+                        className="px-2 py-0.5 rounded bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-200 text-[10px] font-semibold flex items-center gap-1"
+                      >
+                        <Plus className="w-3 h-3" />
+                        <span>Add</span>
+                      </button>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    {extractionResult.medicinesMentioned.map((med, idx) =>
+                      isEditingM5Rx ? (
+                        <div
+                          key={med.id || idx}
+                          className="p-2.5 rounded-lg bg-revonix-850 border border-purple-500/40 space-y-1.5 text-[11px]"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              placeholder="Medicine name"
+                              value={med.name}
+                              onChange={(e) => updateM5Medicine(idx, 'name', e.target.value)}
+                              className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-white font-semibold"
+                            />
+                            <select
+                              value={med.form}
+                              onChange={(e) => updateM5Medicine(idx, 'form', e.target.value)}
+                              className="bg-slate-900 border border-slate-700 rounded px-1.5 py-1 text-purple-200"
+                            >
+                              <option value="Tablet">Tablet</option>
+                              <option value="Capsule">Capsule</option>
+                              <option value="Syrup">Syrup</option>
+                              <option value="Injection">Injection</option>
+                              <option value="Gel/Ointment">Gel/Ointment</option>
+                              <option value="Drops">Drops</option>
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() => deleteM5Medicine(idx)}
+                              title="Remove medicine"
+                              className="p-1 rounded bg-rose-950/70 hover:bg-rose-900 text-rose-300"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                            <input
+                              type="text"
+                              placeholder="Dosage"
+                              value={med.dosage}
+                              onChange={(e) => updateM5Medicine(idx, 'dosage', e.target.value)}
+                              className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200"
+                            />
+                            <input
+                              type="text"
+                              placeholder="Freq (1-0-1)"
+                              value={med.frequency}
+                              onChange={(e) => updateM5Medicine(idx, 'frequency', e.target.value)}
+                              className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-purple-200"
+                            />
+                            <select
+                              value={med.timing}
+                              onChange={(e) => updateM5Medicine(idx, 'timing', e.target.value)}
+                              className="bg-slate-900 border border-slate-700 rounded px-1.5 py-1 text-slate-200"
+                            >
+                              <option value="Before Food">Before Food</option>
+                              <option value="After Food">After Food</option>
+                              <option value="With Food">With Food</option>
+                              <option value="At Bedtime">At Bedtime</option>
+                              <option value="As Needed">As Needed</option>
+                            </select>
+                            <input
+                              type="text"
+                              placeholder="Duration"
+                              value={med.duration}
+                              onChange={(e) => updateM5Medicine(idx, 'duration', e.target.value)}
+                              className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-cyan-200"
+                            />
+                          </div>
+                          <input
+                            type="text"
+                            placeholder="Medicine instructions"
+                            value={med.instructions}
+                            onChange={(e) => updateM5Medicine(idx, 'instructions', e.target.value)}
+                            className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300"
+                          />
                         </div>
-                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-revonix-purple-900 text-revonix-purple-300 font-mono">
-                          {med.form}
-                        </span>
-                      </div>
-                    ))}
+                      ) : (
+                        <div
+                          key={med.id || idx}
+                          className="p-2 rounded-lg bg-revonix-850 border border-revonix-700/70 flex items-center justify-between text-[11px]"
+                        >
+                          <div>
+                            <div className="font-bold text-white">{med.name || '(Unnamed)'}</div>
+                            <div className="text-[10px] text-slate-400">
+                              {med.dosage} • {med.frequency} • {med.timing} • {med.duration}
+                              {med.instructions ? ` • ${med.instructions}` : ''}
+                            </div>
+                          </div>
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-revonix-purple-900 text-revonix-purple-300 font-mono">
+                            {med.form}
+                          </span>
+                        </div>
+                      )
+                    )}
                   </div>
                 </div>
 
                 {/* Follow-up recommendation */}
-                <div className="p-3 rounded-xl bg-revonix-900/60 border border-revonix-700/40 space-y-1">
+                <div className="p-3 rounded-xl bg-revonix-900/60 border border-revonix-700/40 space-y-1.5">
                   <div className="font-bold text-revonix-purple-300 text-[11px] uppercase">
-                    Follow-up Recommendation
+                    Follow-up Recommendation &amp; Target Date
                   </div>
-                  <p className="text-slate-200">{extractionResult.followUpRecommendation}</p>
-                  <p className="text-[10px] text-amber-300 font-mono">
-                    Target Date: {extractionResult.followUpDate}
-                  </p>
+                  {isEditingM5Rx ? (
+                    <div className="space-y-1.5 text-[11px]">
+                      <textarea
+                        rows={2}
+                        value={extractionResult.followUpRecommendation}
+                        onChange={(e) =>
+                          setExtractionResult((prev) =>
+                            prev ? { ...prev, followUpRecommendation: e.target.value } : prev
+                          )
+                        }
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-100"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Target Follow-Up Date (e.g. 2026-11-25)"
+                        value={extractionResult.followUpDate}
+                        onChange={(e) =>
+                          setExtractionResult((prev) =>
+                            prev ? { ...prev, followUpDate: e.target.value } : prev
+                          )
+                        }
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-amber-300 font-mono"
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-slate-200">{extractionResult.followUpRecommendation}</p>
+                      <p className="text-[10px] text-amber-300 font-mono">
+                        Target Date: {extractionResult.followUpDate}
+                      </p>
+                    </>
+                  )}
                 </div>
               </>
             )}

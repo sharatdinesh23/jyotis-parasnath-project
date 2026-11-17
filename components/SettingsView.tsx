@@ -364,7 +364,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       : 'bg-revonix-900 text-slate-300 border-revonix-700'
                   }`}
                 >
-                  openai/gpt-oss-120b (Free High-Accuracy)
+                  openai/gpt-oss-120b (Free Recommended)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAiModel('qwen/qwen3.8-27b')}
+                  className={`px-3 py-1.5 rounded-lg border font-mono ${
+                    aiModel === 'qwen/qwen3.8-27b'
+                      ? 'bg-orange-600 text-white border-orange-400 font-bold'
+                      : 'bg-revonix-900 text-slate-300 border-revonix-700'
+                  }`}
+                >
+                  qwen/qwen3.8-27b (Multilingual)
                 </button>
                 <button
                   type="button"

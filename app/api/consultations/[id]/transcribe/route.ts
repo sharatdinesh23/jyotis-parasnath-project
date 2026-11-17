@@ -9,6 +9,8 @@ export async function POST(req: Request, { params }: { params: { id: string } })
       audioBase64: body.audioBase64,
       mimeType: body.mimeType,
       language: body.language,
+      targetLanguage: body.targetLanguage || body.language,
+      translateOnly: Boolean(body.translateOnly),
       providerOverride: body.providerOverride,
       apiKeyOverride: body.apiKeyOverride,
       isKneePainBenchmark: body.isKneePainBenchmark,

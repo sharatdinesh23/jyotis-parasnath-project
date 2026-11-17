@@ -35,7 +35,7 @@ export const PatientVoiceNoteRecorder: React.FC<PatientVoiceNoteRecorderProps> =
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioBase64, setAudioBase64] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [language, setLanguage] = useState<'en' | 'hi' | 'mr'>('hi');
+  const [language, setLanguage] = useState<'en' | 'hi' | 'mr'>('en');
   const [transcript, setTranscript] = useState('');
   const [chiefIssue, setChiefIssue] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -46,6 +46,8 @@ export const PatientVoiceNoteRecorder: React.FC<PatientVoiceNoteRecorderProps> =
   const audioChunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
+  const speechRecRef = useRef<any>(null);
+  const liveSpokenRef = useRef<string>('');
 
   // Clean up timer on unmount
   useEffect(() => {
@@ -62,6 +64,7 @@ export const PatientVoiceNoteRecorder: React.FC<PatientVoiceNoteRecorderProps> =
     setChiefIssue('');
     setRecordingSeconds(0);
     audioChunksRef.current = [];
+    liveSpokenRef.current = '';
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -74,7 +77,34 @@ export const PatientVoiceNoteRecorder: React.FC<PatientVoiceNoteRecorderProps> =
         }
       };
 
+      const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRec) {
+        try {
+          const rec = new SpeechRec();
+          rec.continuous = true;
+          rec.interimResults = true;
+          rec.lang = language === 'hi' ? 'hi-IN' : language === 'mr' ? 'mr-IN' : 'en-IN';
+          rec.onresult = (evt: any) => {
+            const text = Array.from(evt.results)
+              .map((r: any) => r[0].transcript)
+              .join(' ')
+              .trim();
+            if (text) {
+              liveSpokenRef.current = text;
+              setTranscript(text);
+              setChiefIssue(text.length > 110 ? text.slice(0, 107) + '...' : text);
+            }
+          };
+          rec.onerror = () => {};
+          rec.start();
+          speechRecRef.current = rec;
+        } catch {}
+      }
+
       mediaRecorder.onstop = () => {
+        if (speechRecRef.current) {
+          try { speechRecRef.current.stop(); } catch {}
+        }
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         const url = URL.createObjectURL(audioBlob);
         setAudioUrl(url);
@@ -82,15 +112,43 @@ export const PatientVoiceNoteRecorder: React.FC<PatientVoiceNoteRecorderProps> =
         // Convert to base64
         const reader = new FileReader();
         reader.readAsDataURL(audioBlob);
-        reader.onloadend = () => {
-          setAudioBase64(reader.result as string);
+        reader.onloadend = async () => {
+          const base64 = reader.result as string;
+          setAudioBase64(base64);
+          try {
+            const res = await fetch('/api/consultations/CON-TEMP/transcribe', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                audioBase64: base64,
+                mimeType: audioBlob.type || 'audio/webm',
+                language,
+                targetLanguage: language,
+                defaultSpeaker: 'Patient',
+              }),
+            });
+            const data = await res.json();
+            if (data.transcript && data.transcript.length > 0) {
+              const joined = data.transcript.map((s: any) => s.text).join(' ').trim();
+              if (joined) {
+                setTranscript(joined);
+                setChiefIssue(joined.length > 110 ? joined.slice(0, 107) + '...' : joined);
+                return;
+              }
+            }
+          } catch {}
+
+          if (liveSpokenRef.current.trim()) {
+            const txt = liveSpokenRef.current.trim();
+            setTranscript(txt);
+            setChiefIssue(txt.length > 110 ? txt.slice(0, 107) + '...' : txt);
+          } else {
+            generateAITranscript(language);
+          }
         };
 
         // Stop all audio tracks
         stream.getTracks().forEach((track) => track.stop());
-
-        // Simulated AI Transcription matching the selected language
-        generateAITranscript(language);
       };
 
       mediaRecorder.start(200);
@@ -165,9 +223,29 @@ export const PatientVoiceNoteRecorder: React.FC<PatientVoiceNoteRecorderProps> =
     }
   };
 
-  const handleLanguageChange = (lang: 'en' | 'hi' | 'mr') => {
+  const handleLanguageChange = async (lang: 'en' | 'hi' | 'mr') => {
     setLanguage(lang);
-    if (audioUrl) {
+    if (transcript.trim() && audioUrl) {
+      try {
+        const res = await fetch('/api/consultations/CON-TEMP/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            translateOnly: true,
+            targetLanguage: lang,
+            rawSegmentsToDiarize: [
+              { id: 'vn-1', speaker: 'Patient', timestamp: '00:00', text: transcript, language }
+            ],
+          }),
+        });
+        const data = await res.json();
+        if (data.transcript?.[0]?.text) {
+          const tText = data.transcript[0].text;
+          setTranscript(tText);
+          setChiefIssue(tText.length > 110 ? tText.slice(0, 107) + '...' : tText);
+          return;
+        }
+      } catch {}
       generateAITranscript(lang);
     }
   };

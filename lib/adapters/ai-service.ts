@@ -98,6 +98,7 @@ async function tryGroqExtraction(
   const groqCandidates = Array.from(new Set([
     rawModel && !rawModel.includes('gemini') ? rawModel : 'openai/gpt-oss-120b',
     'openai/gpt-oss-120b',
+    'qwen/qwen3.8-27b',
     'openai/gpt-oss-20b',
     'llama-3.3-70b-versatile',
     'llama-3.1-8b-instant'
@@ -111,6 +112,7 @@ async function tryGroqExtraction(
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey.trim()}`,
         },
+        signal: AbortSignal.timeout(15000),
         body: JSON.stringify({
           model: groqModel,
           response_format: { type: 'json_object' },
@@ -164,6 +166,7 @@ async function tryGeminiExtraction(
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(12000),
         body: JSON.stringify({
           systemInstruction: {
             parts: [{ text: systemPrompt }]

@@ -5,6 +5,8 @@ export interface TranscribeRequest {
   audioBase64?: string;
   mimeType?: string;
   language?: string;
+  targetLanguage?: 'en' | 'hi' | 'mr' | 'auto';
+  translateOnly?: boolean;
   providerOverride?: 'groq' | 'openai' | 'deepgram' | 'mock';
   apiKeyOverride?: string;
   isKneePainBenchmark?: boolean;
@@ -167,6 +169,143 @@ function heuristicDiarizeSegments(segments: TranscriptSegment[]): TranscriptSegm
   return out.length > 0 ? out : segments;
 }
 
+function getLanguageDisplayName(code?: string): string {
+  if (code === 'en') return 'English';
+  if (code === 'hi') return 'Hindi (हिंदी)';
+  if (code === 'mr') return 'Marathi (मराठी)';
+  return 'Mixed (HI / MR / EN)';
+}
+
+function getWhisperPromptForLanguage(lang?: string): string {
+  if (lang === 'en') {
+    return 'Medical outpatient clinic consultation in English. Standard English clinical terms, prescriptions, and patient symptoms.';
+  }
+  if (lang === 'hi') {
+    return 'पारसनाथ क्लिनिक बाह्य रोगी परामर्श हिंदी में। लक्षण, जांच और दवाइयां।';
+  }
+  if (lang === 'mr') {
+    return 'पारसनाथ क्लिनिक बाह्यरुग्ण सल्लामसलत मराठीमध्ये। लक्षणे, तपासणी आणि औषधे.';
+  }
+  return 'Parasnath Clinic OPD consultation.';
+}
+
+async function translateSegmentsToLanguage(
+  segments: TranscriptSegment[],
+  targetLang?: string
+): Promise<TranscriptSegment[]> {
+  if (!segments || segments.length === 0 || !targetLang || targetLang === 'auto') {
+    return segments;
+  }
+
+  const targetName = targetLang === 'en' ? 'English' : targetLang === 'mr' ? 'Marathi (Devanagari script)' : 'Hindi (Devanagari script)';
+  const needsTranslation = segments.some((s) => {
+    const hasDevanagari = /[\u0900-\u097F]/.test(s.text);
+    if (targetLang === 'en') return hasDevanagari || (s.language && s.language !== 'en');
+    return !hasDevanagari || (s.language && s.language !== targetLang);
+  });
+
+  if (!needsTranslation) {
+    return segments.map((s) => ({ ...s, language: targetLang }));
+  }
+
+  const prompt = `Translate each medical consultation segment accurately into ${targetName}. Keep speaker, id, and timestamp identical. Return strictly valid JSON: { "segments": [{ "id": "...", "speaker": "Doctor" | "Patient", "timestamp": "...", "text": "..." }] }`;
+  const payload = JSON.stringify(segments);
+
+  // 1. Try Groq LLM translation
+  const groqKey = process.env.GROQ_API_KEY?.trim();
+  if (groqKey && groqKey.length > 5) {
+    for (const model of ['openai/gpt-oss-120b', 'openai/gpt-oss-20b']) {
+      try {
+        const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${groqKey}` },
+          body: JSON.stringify({
+            model,
+            response_format: { type: 'json_object' },
+            messages: [
+              { role: 'system', content: prompt },
+              { role: 'user', content: payload },
+            ],
+            temperature: 0.1,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const parsed = JSON.parse((data.choices?.[0]?.message?.content || '').replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim());
+          if (Array.isArray(parsed.segments) && parsed.segments.length > 0) {
+            return parsed.segments.map((s: any, i: number) => ({
+              id: s.id || segments[i]?.id || `tr-${i + 1}`,
+              speaker: s.speaker === 'Patient' ? 'Patient' : 'Doctor',
+              timestamp: s.timestamp || segments[i]?.timestamp || '00:00',
+              text: String(s.text || segments[i]?.text || '').trim(),
+              language: targetLang,
+            }));
+          }
+        }
+      } catch {}
+    }
+  }
+
+  // 2. Try Gemini LLM translation
+  const geminiKey = process.env.GEMINI_API_KEY?.trim();
+  if (geminiKey && geminiKey.length > 5) {
+    for (const model of ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-flash-latest']) {
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: prompt }] },
+            contents: [{ parts: [{ text: payload }] }],
+            generationConfig: { responseMimeType: 'application/json', temperature: 0.1 },
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) {
+            const parsed = JSON.parse(text.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim());
+            if (Array.isArray(parsed.segments) && parsed.segments.length > 0) {
+              return parsed.segments.map((s: any, i: number) => ({
+                id: s.id || segments[i]?.id || `tr-${i + 1}`,
+                speaker: s.speaker === 'Patient' ? 'Patient' : 'Doctor',
+                timestamp: s.timestamp || segments[i]?.timestamp || '00:00',
+                text: String(s.text || segments[i]?.text || '').trim(),
+                language: targetLang,
+              }));
+            }
+          }
+        }
+      } catch {}
+    }
+  }
+
+  // 3. Free zero-key fallback via Google Translate public endpoint
+  try {
+    const translated = await Promise.all(
+      segments.map(async (seg) => {
+        try {
+          const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(seg.text)}`;
+          const r = await fetch(url);
+          if (r.ok) {
+            const json = await r.json();
+            const combined = Array.isArray(json?.[0])
+              ? json[0].map((chunk: any) => chunk?.[0] || '').join('')
+              : '';
+            if (combined.trim()) {
+              return { ...seg, text: combined.trim(), language: targetLang };
+            }
+          }
+        } catch {}
+        return { ...seg, language: targetLang };
+      })
+    );
+    return translated;
+  } catch {
+    return segments;
+  }
+}
+
 export async function transcribeAudio(req: TranscribeRequest): Promise<{
   transcript: TranscriptSegment[];
   providerUsed: string;
@@ -174,18 +313,30 @@ export async function transcribeAudio(req: TranscribeRequest): Promise<{
 }> {
   const provider = req.providerOverride || process.env.TRANSCRIPTION_PROVIDER || 'mock';
   const speakerLabel = req.defaultSpeaker || 'Doctor';
+  const targetLang = (req.targetLanguage && req.targetLanguage !== 'auto')
+    ? req.targetLanguage
+    : (req.language && req.language !== 'auto' ? req.language : 'auto');
 
-  // Diarize live-captured browser speech segments directly when requested
+  // Translate or Diarize live-captured/existing segments directly when requested
   if (req.rawSegmentsToDiarize && req.rawSegmentsToDiarize.length > 0) {
-    const diarized = req.diarizationMode === 'ambient_ai'
-      ? await diarizeSegmentsWithAI(req.rawSegmentsToDiarize)
-      : req.rawSegmentsToDiarize;
+    let processed = req.translateOnly
+      ? req.rawSegmentsToDiarize
+      : (req.diarizationMode === 'ambient_ai'
+          ? await diarizeSegmentsWithAI(req.rawSegmentsToDiarize)
+          : req.rawSegmentsToDiarize);
+
+    if (targetLang !== 'auto') {
+      processed = await translateSegmentsToLanguage(processed, targetLang);
+    }
+
     return {
-      transcript: diarized,
-      providerUsed: req.diarizationMode === 'ambient_ai'
+      transcript: processed,
+      providerUsed: req.translateOnly
+        ? `Transcript Language: ${getLanguageDisplayName(targetLang)}`
+        : req.diarizationMode === 'ambient_ai'
         ? 'AI Ambient Speaker Diarization [LIVE]'
         : 'Doctor Clinical Dictation [LIVE]',
-      detectedLanguage: 'Mixed (HI / MR / EN)'
+      detectedLanguage: getLanguageDisplayName(targetLang)
     };
   }
 
@@ -208,13 +359,25 @@ export async function transcribeAudio(req: TranscribeRequest): Promise<{
           const blob = new Blob([audioBuffer], { type: req.mimeType || 'audio/webm' });
           formData.append('file', blob, `recording.${ext}`);
           formData.append('model', whisperModel);
-          formData.append('prompt', 'Parasnath Clinic OPD consultation in Hindi, Marathi, and English.');
-          if (req.language && req.language !== 'auto') {
-            formData.append('language', req.language);
+          formData.append('prompt', getWhisperPromptForLanguage(targetLang));
+          if (targetLang !== 'auto' && targetLang !== 'mr') {
+            formData.append('language', targetLang);
+          } else if (targetLang === 'mr') {
+            formData.append('language', 'mr');
           }
           formData.append('response_format', 'verbose_json');
 
-          const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+          const endpoint = targetLang === 'en'
+            ? 'https://api.groq.com/openai/v1/audio/translations'
+            : 'https://api.groq.com/openai/v1/audio/transcriptions';
+
+          // Note: /audio/translations only accepts whisper-large-v3 and outputs English directly
+          const useTranslationsEndpoint = targetLang === 'en' && whisperModel === 'whisper-large-v3';
+          if (useTranslationsEndpoint) {
+            formData.delete('language');
+          }
+
+          const response = await fetch(useTranslationsEndpoint ? endpoint : 'https://api.groq.com/openai/v1/audio/transcriptions', {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${apiKey.trim()}`,
@@ -231,7 +394,7 @@ export async function transcribeAudio(req: TranscribeRequest): Promise<{
                 speaker: speakerLabel,
                 timestamp: formatSeconds(seg.start || 0),
                 text: seg.text.trim(),
-                language: result.language || 'Mixed'
+                language: targetLang !== 'auto' ? targetLang : (result.language || 'Mixed')
               }));
 
             if (segments.length === 0 && result.text && result.text.trim().length > 0) {
@@ -240,7 +403,7 @@ export async function transcribeAudio(req: TranscribeRequest): Promise<{
                 speaker: speakerLabel,
                 timestamp: '00:00',
                 text: result.text.trim(),
-                language: result.language || 'Mixed'
+                language: targetLang !== 'auto' ? targetLang : (result.language || 'Mixed')
               });
             }
 
@@ -248,12 +411,15 @@ export async function transcribeAudio(req: TranscribeRequest): Promise<{
               if (req.diarizationMode === 'ambient_ai') {
                 segments = await diarizeSegmentsWithAI(segments);
               }
+              if (targetLang !== 'auto') {
+                segments = await translateSegmentsToLanguage(segments, targetLang);
+              }
               return {
                 transcript: segments,
                 providerUsed: req.diarizationMode === 'ambient_ai'
                   ? `Groq ${whisperModel} + AI Speaker Diarization [LIVE]`
                   : `Groq ${whisperModel} [LIVE Free Engine]`,
-                detectedLanguage: result.language || 'Mixed'
+                detectedLanguage: targetLang !== 'auto' ? getLanguageDisplayName(targetLang) : (result.language || 'Mixed')
               };
             }
           } else {
@@ -366,10 +532,14 @@ export async function transcribeAudio(req: TranscribeRequest): Promise<{
 
   // 3. FALLBACK: Only return Knee Pain benchmark if explicitly requested or zero audio provided
   if (req.isKneePainBenchmark || !req.audioBase64) {
+    let bench = sampleKneePainConsultation.transcript;
+    if (targetLang !== 'auto' && targetLang !== 'hi') {
+      bench = await translateSegmentsToLanguage(bench, targetLang);
+    }
     return {
-      transcript: sampleKneePainConsultation.transcript,
+      transcript: bench,
       providerUsed: 'Mock Speech Adapter (Knee Pain Benchmark Script)',
-      detectedLanguage: 'Mixed Hindi-English'
+      detectedLanguage: getLanguageDisplayName(targetLang)
     };
   }
 

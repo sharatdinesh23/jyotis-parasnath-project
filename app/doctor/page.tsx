@@ -149,6 +149,9 @@ export default function DoctorWorkspacePage() {
   };
 
   const handleUpdateCasePaper = async (id: string, casePaper: Partial<CasePaper>) => {
+    setConsultations((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, casePaper: { ...c.casePaper, ...casePaper } } : c))
+    );
     await fetch(`/api/consultations/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -156,11 +159,40 @@ export default function DoctorWorkspacePage() {
     });
   };
 
-  const handleUpdatePrescription = async (id: string, medicines: MedicineItem[]) => {
+  const handleUpdatePrescription = async (
+    id: string,
+    medicines: MedicineItem[],
+    instructions: string[],
+    followUpDate: string,
+    dietaryAdvice?: string[]
+  ) => {
+    setConsultations((prev) =>
+      prev.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              prescription: {
+                ...c.prescription,
+                medicines,
+                instructions,
+                followUpDate,
+                dietaryAdvice: dietaryAdvice !== undefined ? dietaryAdvice : c.prescription.dietaryAdvice,
+              },
+            }
+          : c
+      )
+    );
     await fetch(`/api/consultations/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prescription: { medicines } }),
+      body: JSON.stringify({
+        prescription: {
+          medicines,
+          instructions,
+          followUpDate,
+          ...(dietaryAdvice !== undefined ? { dietaryAdvice } : {}),
+        },
+      }),
     });
   };
 
@@ -174,7 +206,7 @@ export default function DoctorWorkspacePage() {
   return (
     <div className="h-screen w-screen flex flex-col bg-slate-950 text-slate-100 overflow-hidden font-sans">
       {/* Doctor Header */}
-      <header className="h-16 flex-shrink-0 bg-slate-900 border-b border-slate-800 px-6 flex items-center justify-between z-30">
+      <header className="min-h-[4rem] h-auto flex-shrink-0 bg-slate-900 border-b border-slate-800 px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-3 z-30">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-purple-600 to-indigo-600 flex items-center justify-center text-white shadow">
             <Stethoscope className="w-5 h-5 text-white" />

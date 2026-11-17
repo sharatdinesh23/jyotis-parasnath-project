@@ -62,33 +62,33 @@ export const Navbar: React.FC<NavbarProps> = ({
       </div>
 
       {/* Main Navigation Bar */}
-      <div className="w-full h-14 px-4 sm:px-6 flex items-center justify-between gap-4">
+      <div className="w-full min-h-[3.5rem] h-auto px-3 sm:px-5 py-1.5 flex flex-wrap items-center justify-between gap-2 sm:gap-3">
         {/* Left: Clean Brand Logo & Name (Guaranteed No Wrapping) */}
-        <div className="flex items-center gap-3 flex-shrink-0">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-purple-600 via-indigo-600 to-cyan-500 flex items-center justify-center shadow-md shadow-purple-900/30">
-            <Activity className="w-5 h-5 text-white" />
+        <div className="flex items-center gap-2.5 flex-shrink-0">
+          <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-tr from-purple-600 via-indigo-600 to-cyan-500 flex items-center justify-center shadow-md shadow-purple-900/30 shrink-0">
+            <Activity className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
           </div>
 
           <div className="flex flex-col justify-center leading-tight">
-            <div className="flex items-center gap-2">
-              <span className="text-base font-extrabold tracking-tight text-white whitespace-nowrap">
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm sm:text-base font-extrabold tracking-tight text-white whitespace-nowrap">
                 Parasnath AI
               </span>
-              <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-purple-950/80 text-purple-300 border border-purple-700/50">
+              <span className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-purple-950/80 text-purple-300 border border-purple-700/50 whitespace-nowrap">
                 Clinic
               </span>
             </div>
-            <span className="text-[11px] text-slate-400 font-medium whitespace-nowrap">
+            <span className="text-[10px] sm:text-[11px] text-slate-400 font-medium whitespace-nowrap hidden sm:block">
               Parasnath Speciality Clinic • Badlapur
             </span>
           </div>
         </div>
 
-        {/* Center: Simplified Provider Status Badge (Low Cognitive Load) */}
+        {/* Center: Simplified Provider Status Badge (Low Cognitive Load, Auto-Fit) */}
         <div className="hidden md:flex items-center">
           <button
             onClick={onOpenSettings}
-            className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border transition-all whitespace-nowrap ${
               isMock
                 ? 'bg-amber-950/30 text-amber-300 border-amber-600/40 hover:bg-amber-900/40'
                 : 'bg-emerald-950/30 text-emerald-300 border-emerald-600/40 hover:bg-emerald-900/40'
@@ -97,23 +97,23 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             {isMock ? (
               <>
-                <Cpu className="w-3.5 h-3.5 text-amber-400" />
-                <span>Demo Mode (Mock Adapter)</span>
-                <span className="text-[10px] text-amber-400/80 font-normal">⚙ Configure</span>
+                <Cpu className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>Demo Mode</span>
+                <span className="text-[10px] text-amber-400/80 font-normal hidden lg:inline">(Mock Adapter) • ⚙ Configure</span>
               </>
             ) : (
               <>
-                <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                <Sparkles className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                 <span className="uppercase">{aiProvider}</span>
-                <span className="text-[10px] text-slate-400">({aiModel})</span>
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span className="text-[10px] text-slate-400 hidden lg:inline">({aiModel})</span>
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
               </>
             )}
           </button>
         </div>
 
         {/* Right: Clean, Friendly Controls */}
-        <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
+        <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap ml-auto">
           {/* Segmented Language Switcher */}
           <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-xs">
             <button
